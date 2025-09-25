@@ -1,0 +1,47 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+
+# Virtual environ
+amnet_env/
+venv/
+env/
+.venv/
+.env
+
+# Editors & OS
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+
+# Data, models, outputs (ignore by default)
+data/
+images/
+attention_maps_all/
+new_vehicles_test/
+new_vehicles_attention/
+perturbation_output/
+sticker_dataset/
+
+# Model & large binary files
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.npy
+*.npz
+*.zip
+*.tar.gz
+
+# Misc
+all_predictions.csv
+new_vehicles_predictions.csv

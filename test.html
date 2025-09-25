@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vehicle Memorability Study</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 900px;
+            width: 90%;
+            text-align: center;
+        }
+        
+        .phase-indicator {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: bold;
+            color: #495057;
+        }
+        
+        .image-container {
+            width: 512px;
+            height: 384px;
+            margin: 20px auto;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #f8f9fa;
+            position: relative;
+        }
+        
+        .study-image {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            border-radius: 6px;
+        }
+        
+        .fixation-cross {
+            font-size: 48px;
+            font-weight: bold;
+            color: #495057;
+        }
+        
+        .timer {
+            position: absolute;
+            top: 10px;
+            right: 15px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 14px;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e9ecef;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 20px 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #28a745, #20c997);
+            transition: width 0.3s ease;
+            border-radius: 4px;
+        }
+        
+        .buttons {
+            margin-top: 30px;
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            min-width: 120px;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .instructions {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            border-left: 4px solid #2196f3;
+        }
+        
+        .instructions h3 {
+            color: #1976d2;
+            margin-bottom: 10px;
+        }
+        
+        .score-display {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+            display: none;
+        }
+        
+        .admin-panel {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            display: none;
+        }
+        
+        .results-container {
+            text-align: left;
+            max-height: 400px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        
+        .demographic-form {
+            text-align: left;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #495057;
+        }
+        
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+                width: 95%;
+            }
+            
+            .image-container {
+                width: 100%;
+                max-width: 400px;
+                height: 300px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="welcome-screen">
+            <h1>🚗 Vehicle Memorability Study</h1>
+            <div class="instructions">
+                <h3>Welcome to our research study!</h3>
+                <p><strong>What you'll do:</strong></p>
+                <ul style="text-align: left; margin-left: 20px;">
+                    <li>Look at vehicle images for a few seconds each</li>
+                    <li>Try to remember them</li>
+                    <li>Later, identify which images you've seen before</li>
+                    <li>Complete a short demographic questionnaire</li>
+                </ul>
+                <p style="margin-top: 15px;"><strong>Time required:</strong> About 15-20 minutes</p>
+                <p><strong>Your participation is voluntary and anonymous.</strong></p>
+            </div>
+            
+            <div class="demographic-form">
+                <h3>Please provide some basic information:</h3>
+                <div class="form-group">
+                    <label for="age">Age:</label>
+                    <input type="number" id="age" min="18" max="100" required>
+                </div>
+                <div class="form-group">
+                    <label for="gender">Gender:</label>
+                    <select id="gender" required>
+                        <option value="">Select...</option>
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                        <option value="other">Other</option>
+                        <option value="prefer-not-to-say">Prefer not to say</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="vision">Do you have normal or corrected-to-normal vision?</label>
+                    <select id="vision" required>
+                        <option value="">Select...</option>
+                        <option value="normal">Normal vision</option>
+                        <option value="corrected">Corrected vision (glasses/contacts)</option>
+                        <option value="impaired">Vision impairment</option>
+                    </select>
+                </div>
+            </div>
+            
+            <button onclick="startStudy()">Start Study</button>
+        </div>
+
+        <div id="study-screen" style="display: none;">
+            <div class="phase-indicator" id="phase-indicator">
+                Encoding Phase - Memorize these vehicles
+            </div>
+            
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+            </div>
+            
+            <div class="image-container">
+                <div class="timer" id="timer">3</div>
+                <div class="fixation-cross" id="fixation-cross">+</div>
+                <img id="study-image" class="study-image" style="display: none;">
+            </div>
+            
+            <div class="buttons" id="button-container" style="display: none;">
+                <button onclick="markSeen()">✓ Seen Before</button>
+                <button onclick="markNew()">✗ New Image</button>
+            </div>
+            
+            <div id="confidence-buttons" style="display: none;">
+                <p style="margin-bottom: 15px;">How confident are you?</p>
+                <button onclick="recordConfidence(1)">1 - Not at all</button>
+                <button onclick="recordConfidence(2)">2 - Slightly</button>
+                <button onclick="recordConfidence(3)">3 - Moderately</button>
+                <button onclick="recordConfidence(4)">4 - Very</button>
+                <button onclick="recordConfidence(5)">5 - Extremely</button>
+            </div>
+        </div>
+
+        <div id="results-screen" style="display: none;">
+            <h2>🎉 Study Complete!</h2>
+            <p>Thank you for participating in our vehicle memorability research!</p>
+            
+            <div class="score-display" id="score-display">
+                <h3>Your Performance:</h3>
+                <p id="accuracy-score"></p>
+                <p id="response-time"></p>
+            </div>
+            
+            <div class="buttons">
+                <button onclick="downloadResults()">📊 Download Results</button>
+                <button onclick="resetStudy()">🔄 Start New Session</button>
+            </div>
+            
+            <div class="results-container" id="results-container">
+                <h4>Detailed Results:</h4>
+                <pre id="results-data"></pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="admin-panel" id="admin-panel">
+        <div>Participant: <span id="participant-id"></span></div>
+        <div>Images loaded: <span id="images-loaded">0</span></div>
+        <div>Current phase: <span id="current-phase">Welcome</span></div>
+        <button onclick="toggleAdmin()" style="margin-top: 10px; font-size: 11px; padding: 5px 10px;">Hide</button>
+    </div>
+
+    <script>
+        // Global variables
+        let currentPhase = 'welcome'; // welcome, encoding, distractor, recognition, complete
+        let images = [];
+        let currentImageIndex = 0;
+        let startTime = Date.now();
+        let participantData = {};
+        let results = [];
+        let encodingImages = [];
+        let recognitionImages = [];
+        let currentTimer;
+        let participantId = 'P' + Date.now().toString().slice(-8);
+
+        // Study parameters (following LaMem methodology)
+        const ENCODING_TIME = 1000; // 1 second per image
+        const FIXATION_TIME = 500; // 0.5 seconds
+        const RECOGNITION_IMAGES = 150; // 75 old + 75 new
+        const ENCODING_IMAGES = 75;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('participant-id').textContent = participantId;
+            loadImages();
+            
+            // Show admin panel on Alt+A
+            document.addEventListener('keydown', function(e) {
+                if (e.altKey && e.key === 'a') {
+                    toggleAdmin();
+                }
+            });
+        });
+
+        function toggleAdmin() {
+            const panel = document.getElementById('admin-panel');
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        }
+
+        async function loadImages() {
+            try {
+                // Load the pre-generated list of image filenames
+                const response = await fetch('datasets/memcat_vehicle/image_list.json');
+                const imageFilenames = await response.json();
+                
+                images = [];
+                imageFilenames.forEach((filename, index) => {
+                    images.push({
+                        id: `vehicle_${String(index + 1).padStart(4, '0')}`,
+                        url: `datasets/memcat_vehicle/images/${filename}`,
+                        category: 'vehicle',
+                        filename: filename
+                    });
+                });
+                
+                document.getElementById('images-loaded').textContent = images.length;
+                console.log(`Loaded ${images.length} images`);
+                
+            } catch (error) {
+                console.error('Error loading images:', error);
+                alert('Could not load images. Check the file path and image_list.json');
+            }
+        }
+
+        function startStudy() {
+            // Validate demographic information
+            const age = document.getElementById('age').value;
+            const gender = document.getElementById('gender').value;
+            const vision = document.getElementById('vision').value;
+            
+            if (!age || !gender || !vision) {
+                alert('Please fill in all demographic information before starting.');
+                return;
+            }
+            
+            // Store participant data
+            participantData = {
+                id: participantId,
+                age: parseInt(age),
+                gender: gender,
+                vision: vision,
+                startTime: new Date().toISOString(),
+                userAgent: navigator.userAgent,
+                screenResolution: `${screen.width}x${screen.height}`
+            };
+            
+            // Prepare study images
+            prepareStudyImages();
+            
+            // Switch to study screen
+            document.getElementById('welcome-screen').style.display = 'none';
+            document.getElementById('study-screen').style.display = 'block';
+            document.getElementById('current-phase').textContent = 'Encoding';
+            
+            currentPhase = 'encoding';
+            currentImageIndex = 0;
+            
+            // Start encoding phase
+            startEncodingPhase();
+        }
+
+        function prepareStudyImages() {
+            // Shuffle images
+            const shuffled = [...images].sort(() => Math.random() - 0.5);
+            
+            // Select encoding images (first 75)
+            encodingImages = shuffled.slice(0, ENCODING_IMAGES);
+            
+            // Prepare recognition images (75 old + 75 new)
+            const newImages = shuffled.slice(ENCODING_IMAGES, ENCODING_IMAGES + 75);
+            recognitionImages = [...encodingImages, ...newImages]
+                .sort(() => Math.random() - 0.5); // Shuffle for recognition phase
+            
+            console.log('Study images prepared:', {
+                encoding: encodingImages.length,
+                recognition: recognitionImages.length
+            });
+        }
+
+        function startEncodingPhase() {
+            document.getElementById('phase-indicator').textContent = 
+                `Encoding Phase - Memorize these vehicles (${currentImageIndex + 1}/${ENCODING_IMAGES})`;
+            
+            showFixationCross();
+        }
+
+        function showFixationCross() {
+            const fixationCross = document.getElementById('fixation-cross');
+            const image = document.getElementById('study-image');
+            const timer = document.getElementById('timer');
+            
+            // Hide image, show fixation cross
+            image.style.display = 'none';
+            fixationCross.style.display = 'block';
+            timer.style.display = 'none';
+            
+            // Show fixation for FIXATION_TIME
+            setTimeout(() => {
+                showCurrentImage();
+            }, FIXATION_TIME);
+        }
+
+        function showCurrentImage() {
+            const fixationCross = document.getElementById('fixation-cross');
+            const image = document.getElementById('study-image');
+            const timer = document.getElementById('timer');
+            
+            if (currentPhase === 'encoding') {
+                if (currentImageIndex >= encodingImages.length) {
+                    startDistractorTask();
+                    return;
+                }
+                
+                const currentImg = encodingImages[currentImageIndex];
+                
+                // Hide fixation, show image
+                fixationCross.style.display = 'none';
+                image.style.display = 'block';
+                image.src = currentImg.url;
+                timer.style.display = 'block';
+                
+                // Update progress
+                const progress = ((currentImageIndex + 1) / encodingImages.length) * 50; // 50% for encoding
+                document.getElementById('progress-fill').style.width = progress + '%';
+                
+                // Record image presentation
+                results.push({
+                    phase: 'encoding',
+                    imageId: currentImg.id,
+                    imageUrl: currentImg.url,
+                    presentationTime: Date.now(),
+                    index: currentImageIndex
+                });
+                
+                // Show timer countdown
+                let timeLeft = ENCODING_TIME / 1000;
+                timer.textContent = Math.ceil(timeLeft);
+                
+                const timerInterval = setInterval(() => {
+                    timeLeft -= 0.1;
+                    timer.textContent = Math.ceil(timeLeft);
+                    if (timeLeft <= 0) {
+                        clearInterval(timerInterval);
+                    }
+                }, 100);
+                
+                // Move to next image after ENCODING_TIME
+                setTimeout(() => {
+                    currentImageIndex++;
+                    document.getElementById('phase-indicator').textContent = 
+                        `Encoding Phase - Memorize these vehicles (${currentImageIndex + 1}/${ENCODING_IMAGES})`;
+                    showFixationCross();
+                }, ENCODING_TIME);
+                
+            } else if (currentPhase === 'recognition') {
+                if (currentImageIndex >= recognitionImages.length) {
+                    completeStudy();
+                    return;
+                }
+                
+                const currentImg = recognitionImages[currentImageIndex];
+                
+                // Hide fixation, show image
+                fixationCross.style.display = 'none';
+                image.style.display = 'block';
+                image.src = currentImg.url;
+                timer.style.display = 'none';
+                
+                // Show response buttons
+                document.getElementById('button-container').style.display = 'flex';
+                
+                // Update progress (50-100%)
+                const progress = 50 + ((currentImageIndex + 1) / recognitionImages.length) * 50;
+                document.getElementById('progress-fill').style.width = progress + '%';
+                
+                // Record recognition trial start
+                window.recognitionStartTime = Date.now();
+            }
+        }
+
+        function startDistractorTask() {
+            document.getElementById('phase-indicator').textContent = 'Distractor Task - Count backwards from 1000 by 7s';
+            document.getElementById('study-image').style.display = 'none';
+            document.getElementById('fixation-cross').style.display = 'none';
+            document.getElementById('timer').style.display = 'none';
+            
+            // Show distractor instructions
+            const container = document.querySelector('.image-container');
+            container.innerHTML = `
+                <div style="padding: 40px; text-align: center;">
+                    <h3>Mental Arithmetic Task</h3>
+                    <p style="margin: 20px 0;">Please count backwards from 1000 by 7s</p>
+                    <p style="font-size: 18px; margin: 20px 0;">1000, 993, 986, 979, ...</p>
+                    <p>Continue for 30 seconds</p>
+                    <div id="distractor-timer" style="font-size: 24px; font-weight: bold; margin-top: 20px;">30</div>
+                </div>
+            `;
+            
+            // 30-second distractor task
+            let timeLeft = 30;
+            const distractorInterval = setInterval(() => {
+                timeLeft--;
+                document.getElementById('distractor-timer').textContent = timeLeft;
+                if (timeLeft <= 0) {
+                    clearInterval(distractorInterval);
+                    startRecognitionPhase();
+                }
+            }, 1000);
+        }
+
+        function startRecognitionPhase() {
+            currentPhase = 'recognition';
+            currentImageIndex = 0;
+            
+            // Restore image container
+            const container = document.querySelector('.image-container');
+            container.innerHTML = `
+                <div class="timer" id="timer">3</div>
+                <div class="fixation-cross" id="fixation-cross">+</div>
+                <img id="study-image" class="study-image" style="display: none;">
+            `;
+            
+            document.getElementById('phase-indicator').textContent = 
+                `Recognition Phase - Have you seen this vehicle before? (${currentImageIndex + 1}/${RECOGNITION_IMAGES})`;
+            document.getElementById('current-phase').textContent = 'Recognition';
+            
+            showFixationCross();
+        }
+
+        function markSeen() {
+            recordResponse(true);
+        }
+
+        function markNew() {
+            recordResponse(false);
+        }
+
+        function recordResponse(seenResponse) {
+            const currentImg = recognitionImages[currentImageIndex];
+            const responseTime = Date.now() - window.recognitionStartTime;
+            const wasInEncoding = encodingImages.some(img => img.id === currentImg.id);
+            
+            // Hide response buttons, show confidence buttons
+            document.getElementById('button-container').style.display = 'none';
+            document.getElementById('confidence-buttons').style.display = 'block';
+            
+            // Store partial response
+            window.currentResponse = {
+                phase: 'recognition',
+                imageId: currentImg.id,
+                imageUrl: currentImg.url,
+                wasInEncoding: wasInEncoding,
+                response: seenResponse,
+                correct: (seenResponse && wasInEncoding) || (!seenResponse && !wasInEncoding),
+                responseTime: responseTime,
+                presentationTime: Date.now() - responseTime,
+                trialIndex: currentImageIndex
+            };
+        }
+
+        function recordConfidence(confidence) {
+            // Complete the response record
+            window.currentResponse.confidence = confidence;
+            results.push(window.currentResponse);
+            
+            // Hide confidence buttons
+            document.getElementById('confidence-buttons').style.display = 'none';
+            
+            // Move to next image
+            currentImageIndex++;
+            document.getElementById('phase-indicator').textContent = 
+                `Recognition Phase - Have you seen this vehicle before? (${currentImageIndex + 1}/${RECOGNITION_IMAGES})`;
+            
+            setTimeout(() => {
+                showFixationCross();
+            }, 500);
+        }
+
+        function completeStudy() {
+            currentPhase = 'complete';
+            document.getElementById('current-phase').textContent = 'Complete';
+            
+            // Calculate results
+            const recognitionResults = results.filter(r => r.phase === 'recognition');
+            const accuracy = recognitionResults.reduce((acc, r) => acc + (r.correct ? 1 : 0), 0) / recognitionResults.length;
+            const avgResponseTime = recognitionResults.reduce((acc, r) => acc + r.responseTime, 0) / recognitionResults.length;
+            
+            // Show results screen
+            document.getElementById('study-screen').style.display = 'none';
+            document.getElementById('results-screen').style.display = 'block';
+            document.getElementById('score-display').style.display = 'block';
+            
+            document.getElementById('accuracy-score').textContent = 
+                `Accuracy: ${(accuracy * 100).toFixed(1)}% (${recognitionResults.filter(r => r.correct).length}/${recognitionResults.length})`;
+            document.getElementById('response-time').textContent = 
+                `Average Response Time: ${(avgResponseTime / 1000).toFixed(2)} seconds`;
+            
+            // Show detailed results
+            const finalResults = {
+                participant: participantData,
+                summary: {
+                    accuracy: accuracy,
+                    avgResponseTime: avgResponseTime,
+                    completionTime: Date.now() - startTime
+                },
+                trials: results
+            };
+            
+            document.getElementById('results-data').textContent = JSON.stringify(finalResults, null, 2);
+        }
+
+        function downloadResults() {
+            const recognitionResults = results.filter(r => r.phase === 'recognition');
+            const accuracy = recognitionResults.reduce((acc, r) => acc + (r.correct ? 1 : 0), 0) / recognitionResults.length;
+            const avgResponseTime = recognitionResults.reduce((acc, r) => acc + r.responseTime, 0) / recognitionResults.length;
+            
+            const finalResults = {
+                participant: participantData,
+                summary: {
+                    accuracy: accuracy,
+                    avgResponseTime: avgResponseTime,
+                    completionTime: Date.now() - startTime,
+                    studyCompletedAt: new Date().toISOString()
+                },
+                trials: results
+            };
+            
+            // Create and download JSON file
+            const dataStr = JSON.stringify(finalResults, null, 2);
+            const dataBlob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(dataBlob);
+            
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `vehicle_memorability_${participantId}_${Date.now()}.json`;
+            link.click();
+            
+            URL.revokeObjectURL(url);
+        }
+
+        function resetStudy() {
+            // Reset all variables
+            currentPhase = 'welcome';
+            images = [];
+            currentImageIndex = 0;
+            startTime = Date.now();
+            participantData = {};
+            results = [];
+            encodingImages = [];
+            recognitionImages = [];
+            participantId = 'P' + Date.now().toString().slice(-8);
+            
+            // Reset UI
+            document.getElementById('results-screen').style.display = 'none';
+            document.getElementById('welcome-screen').style.display = 'block';
+            document.getElementById('participant-id').textContent = participantId;
+            document.getElementById('current-phase').textContent = 'Welcome';
+            document.getElementById('progress-fill').style.width = '0%';
+            
+            // Clear form
+            document.getElementById('age').value = '';
+            document.getElementById('gender').value = '';
+            document.getElementById('vision').value = '';
+            
+            // Reload images
+            loadImages();
+        }
+    </script>
+</body>
+</html>

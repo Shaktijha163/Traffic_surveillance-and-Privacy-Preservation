@@ -1,0 +1,11 @@
+torch==2.8.0
+torchvision==0.23.0
+scipy==1.16.1
+scikit-learn==1.7.1
+numpy==2.3.2
+pandas==2.3.2
+Pillow==11.3.0
+matplotlib==3.10.5
+tqdm==4.67.1
+h5py==3.14.0
+

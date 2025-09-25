@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Vehicle Memorability Experiment</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #111; color: #eee; }
+    #game { margin-top: 40px; }
+    img { max-height: 500px; }
+    #instructions, #download { margin: 20px; }
+    button { padding: 10px 20px; font-size: 18px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+    <h1>Vehicle Memorability Experiment</h1>
+    <div id="instructions">
+    <p>You will see a rapid stream of vehicle images (5000 in total). Some images will repeat. Press the <b>SPACEBAR</b> if you think you have seen the image before.</p>
+    <p>Each image will flash for <b>600 ms</b> with a <b>800 ms blank interval</b>. Stay focused!</p>
+    <button id="start">Start Experiment</button>
+    </div>
+    <div id="progress" style="margin:20px; display:none;">
+    <progress id="progressBar" value="0" max="100" style="width:300px;"></progress>
+    <span id="progressText">0 / 0</span>
+    </div>
+    <div id="game" style="display:none;">
+    <img id="stimulus" src="" alt="stimulus">
+    </div>
+
+
+
+  <div id="download" style="display:none;">
+    <button id="downloadBtn">Download Results</button>
+  </div>
+
+<script>
+const IMAGE_LIST_URL = "datasets/memcat_vehicle/image_list.json"; 
+let images = [];
+let schedule = [];
+let trialLog = [];
+let responses = {};
+let currentIndex = 0;
+let experimentStart = null;
+
+const STIM_TIME = 600; // ms on screen
+const ISI = 800; // ms blank
+const MIN_DELAY = 35; // LaMem protocol: repeat after 35–150 images
+const MAX_DELAY = 150;
+
+// Load image manifest
+async function loadImages() {
+    try {
+        const response = await fetch("datasets/memcat_vehicle/image_list.json");
+        const imageFilenames = await response.json();
+
+        images = imageFilenames.map((filename, index) => ({
+            id: `vehicle_${String(index + 1).padStart(4, "0")}`,
+            url: `datasets/memcat_vehicle/images/${filename}`,  
+            filename: filename
+        }));
+
+        console.log("Loaded", images.length, "images");
+        console.log("First few:", images.slice(0, 5).map(img => img.url));
+
+    } catch (error) {
+        console.error("Error loading images:", error);
+    }
+}
+
+function prepareSchedule() {
+  // Shuffle images
+  const shuffled = images.sort(() => Math.random() - 0.5);
+
+  // Assign repeat schedule
+  shuffled.forEach((img, idx) => {
+    schedule.push({ id: img.id, url: img.url, isRepeat: false, origIndex: idx });
+    if (Math.random() < 0.2 && idx + MIN_DELAY < shuffled.length) { // ~20% repeated
+      let repeatPos = idx + MIN_DELAY + Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY));
+      if (repeatPos < shuffled.length) {
+        schedule.splice(repeatPos, 0, { id: img.id, url: img.url, isRepeat: true, origIndex: idx });
+      }
+    }
+  });
+}
+function startExperiment() {
+  document.getElementById('instructions').style.display = 'none';
+  document.getElementById('game').style.display = 'block';
+  document.getElementById('progress').style.display = 'block';
+  experimentStart = Date.now();
+
+  schedule = [];
+  trialLog = [];
+  currentIndex = 0;
+
+  prepareSchedule();
+  runTrial();
+}
+
+function runTrial() {
+  if (currentIndex >= schedule.length) return endExperiment();
+  let trial = schedule[currentIndex];
+  let stim = document.getElementById('stimulus');
+
+  stim.style.display = "block";   // show
+  stim.src = trial.url;
+  let tStart = Date.now();
+
+  // Record presentation
+  trialLog.push({
+    t: tStart - experimentStart,
+    image_id: trial.id,
+    repeat: trial.isRepeat,
+    keypress: false,
+    rt: null
+  });
+
+  // Update progress
+  document.getElementById("progressBar").value = (currentIndex / schedule.length) * 100;
+  document.getElementById("progressText").textContent =
+      `${currentIndex + 1} / ${schedule.length}`;
+
+  setTimeout(() => {
+    stim.style.display = "none";   // hide image during blank
+    stim.src = "";
+    currentIndex++;
+    setTimeout(runTrial, ISI);
+  }, STIM_TIME);
+}
+
+
+
+// Listen for responses
+window.addEventListener('keydown', e => {
+  if (e.code === "Space" && currentIndex < schedule.length) {
+    let tNow = Date.now() - experimentStart;
+    let trial = trialLog[trialLog.length - 1];
+    if (!trial.keypress) {
+      trial.keypress = true;
+      trial.rt = tNow - trial.t;
+    }
+  }
+});
+
+function endExperiment() {
+  document.getElementById('game').style.display = 'none';
+  document.getElementById('download').style.display = 'block';
+  console.log("Experiment finished", trialLog);
+}
+
+// Download results
+function downloadResults() {
+  let data = {
+    participant: "student_" + Math.floor(Math.random() * 100000),
+    date: new Date().toISOString(),
+    trialLog: trialLog
+  };
+  let blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement('a');
+  a.href = url;
+  a.download = "results.json";
+  a.click();
+}
+
+document.getElementById('start').onclick = startExperiment;
+document.getElementById('downloadBtn').onclick = downloadResults;
+
+loadImages();
+</script>
+</body>
+</html>

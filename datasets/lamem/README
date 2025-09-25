@@ -1,0 +1,33 @@
+LaMem: A Large-Scale Dataset for Image Memorability
+
+In this package, we include the images and their memorability scores, after accounting
+for false alarms. The images are available in the 'images/' folder and the memorability
+scores  are available in the 'splits/' folder. In the splits folder, we provide information 
+for 5 splits of the data, each consisting of the train, val and test sets (e.g., train_1.txt,
+val_1.txt, and test_1.txt).
+
+In each txt file, we provide scores in the following way:
+  <image_name> <memorability_score>
+where <image_name> has values like 00000001.jpg and <memorability_score> is a float
+value ranging from 0 to 1.
+
+Note that a particular image can have different scores in different splits because for
+each split of the data, we use a random half of the participants to find the train and 
+validation memorability scores and the other half to find the test scores i.e., both the
+images and participants for each of the splits is disjoint. This setting is the same as 
+that of prior work.
+
+Please cite the following paper if you use this dataset in your work:
+  Understanding and Predicting Image Memorability at a Large Scale
+  Aditya Khosla, Akhil S. Raju, Antonio Torralba and Aude Oliva
+  International Conference on Computer Vision (ICCV), 2015
+
+The bibtex file is available via the project website: http://memorability.csail.mit.edu
+
+For any questions or comments, please contact Aditya Khosla (khosla@csail.mit.edu).
+
+Please read the provided LICENSE file for the terms of use of this data.
+
+Copyright (c) 2015 Aditya Khosla
+
+
