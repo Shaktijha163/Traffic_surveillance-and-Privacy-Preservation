@@ -26,11 +26,15 @@ build/
 # Data, models, outputs (ignore by default)
 data/
 images/
+test_images/
+video/
 attention_maps_all/
 new_vehicles_test/
 new_vehicles_attention/
 perturbation_output/
 sticker_dataset/
+results/
+old_codes/
 
 # Model & large binary files
 *.pth
@@ -41,6 +45,7 @@ sticker_dataset/
 *.npz
 *.zip
 *.tar.gz
+*.deb
 
 # Misc
 all_predictions.csv

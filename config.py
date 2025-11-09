@@ -11,6 +11,89 @@ import torch
 from torch.autograd import Variable
 import pkg_resources
 
+
+# ============================================================================
+# Memorability Thresholds and Categories
+# ============================================================================
+
+# Memorability classification thresholds
+MEMORABILITY_THRESHOLD_HIGH = 0.6  # Threshold for high memorability (requires perturbation)
+MEMORABILITY_THRESHOLD_VERY_HIGH = 0.85  # Threshold for very high memorability
+
+# Memorability categories with ranges
+MEMORABILITY_CATEGORIES = {
+    'very_low': (0.0, 0.3),
+    'low': (0.3, 0.5),
+    'medium': (0.5, 0.7),
+    'high': (0.7, 0.85),
+    'very_high': (0.85, 1.0)
+}
+
+
+# ============================================================================
+# Perturbation Methods Configuration
+# ============================================================================
+
+# Available perturbation methods
+PERTURBATION_METHODS = {
+    'sticker': 'neighbor',      # For stickers: use neighbor fill
+    'bumper': 'neighbor',       # For bumpers: use neighbor fill
+    'door': 'blur',            # For doors: use blur
+    'hood': 'blur',            # For hood: use blur
+    'windshield': 'neighbor',  # For windshield: use neighbor fill
+    'lights': 'blur',          # For lights: use blur
+    'default': 'neighbor'      # Default fallback method
+}
+
+# Perturbation blend ratios (how much of the perturbation to apply)
+PERTURBATION_BLEND_RATIOS = {
+    'sticker': 1.0,      # Full replacement for stickers
+    'default': 0.7       # 70% blend for other parts
+}
+
+
+# ============================================================================
+# Diffusion Model Configuration (Optional)
+# ============================================================================
+
+# Diffusion model settings
+DIFFUSION_CONFIG = {
+    'enabled': False,  # Set to True to enable diffusion (requires diffusers package)
+    'model_id': 'stabilityai/stable-diffusion-2-inpainting',
+    'num_inference_steps': 20,
+    'guidance_scale': 7.5,
+    'use_fp16': True  # Use float16 for faster inference (GPU only)
+}
+
+# Diffusion prompts for each class
+DIFFUSION_PROMPTS = {
+    'sticker': 'plain car surface, no text, no stickers, smooth paint',
+    'bumper': 'generic car bumper, plain, no logos, standard design',
+    'door': 'generic car door, plain surface, no distinctive features',
+    'hood': 'generic car hood, smooth surface, standard paint',
+    'windshield': 'generic car windshield, clear glass, no markings',
+    'lights': 'generic car headlight, standard design, no custom elements',
+    'default': 'generic car part, plain, no distinctive features'
+}
+
+
+# ============================================================================
+# Attention Visualization Configuration
+# ============================================================================
+
+# Attention map settings
+ATTENTION_CONFIG = {
+    'enabled': True,  # Enable attention map generation
+    'alpha': 0.6,     # Blend factor for attention overlay (0.0-1.0)
+    'colormap': 'COLORMAP_JET',  # OpenCV colormap name
+    'show_only_high_mem': True   # Only show attention for high memorability detections
+}
+
+
+# ============================================================================
+# HParameters Class (Original)
+# ============================================================================
+
 class HParameters:
 
     def __init__(self):
@@ -74,6 +157,10 @@ class HParameters:
 
         return info_str
 
+
+# ============================================================================
+# Configuration Function (Original + Updated)
+# ============================================================================
 
 def get_amnet_config(args):
 
@@ -207,7 +294,7 @@ def get_amnet_config(args):
         hps.target_scale = 2.0
         hps.img_mean = [0.485, 0.456, 0.406]
         hps.img_std = [0.229, 0.224, 0.225]
-    # Add this section after the 'ava' dataset configuration and before the 'else' clause
+
     elif hps.dataset_name == 'memcat_vehicle':
         # MemCat Vehicle dataset configuration
         
@@ -245,3 +332,198 @@ def get_amnet_config(args):
 
     return hps
 
+
+# ============================================================================
+# Utility Functions for Memorability Integration
+# ============================================================================
+
+def get_memorability_category(score: float) -> str:
+    """
+    Get memorability category from score
+    
+    Args:
+        score: Memorability score (0-1)
+        
+    Returns:
+        Category name
+    """
+    for category, (low, high) in MEMORABILITY_CATEGORIES.items():
+        if low <= score < high:
+            return category
+    return 'very_high'
+
+
+def get_perturbation_strategy(class_name: str, mem_score: float) -> str:
+    """
+    Determine perturbation strategy based on class and memorability
+    
+    Args:
+        class_name: Detected class name
+        mem_score: Memorability score
+        
+    Returns:
+        Strategy name: 'remove', 'genericize', 'subtle', or 'none'
+    """
+    # Always remove stickers
+    if class_name.lower() == 'sticker':
+        return 'remove'
+    
+    # Very high memorability - aggressive perturbation
+    if mem_score > MEMORABILITY_THRESHOLD_VERY_HIGH:
+        return 'genericize'
+    
+    # High memorability - moderate perturbation
+    if mem_score > MEMORABILITY_THRESHOLD_HIGH:
+        return 'subtle'
+    
+    # Medium and below - no perturbation needed
+    return 'none'
+
+
+def get_perturbation_method(class_name: str) -> str:
+    """
+    Get perturbation method for a specific class
+    
+    Args:
+        class_name: Detected class name
+        
+    Returns:
+        Method name: 'blur', 'neighbor', 'inpaint', or 'generic'
+    """
+    return PERTURBATION_METHODS.get(class_name.lower(), PERTURBATION_METHODS['default'])
+
+
+def get_perturbation_blend_ratio(class_name: str) -> float:
+    """
+    Get blend ratio for perturbation
+    
+    Args:
+        class_name: Detected class name
+        
+    Returns:
+        Blend ratio (0.0-1.0)
+    """
+    return PERTURBATION_BLEND_RATIOS.get(class_name.lower(), PERTURBATION_BLEND_RATIOS['default'])
+
+
+def get_diffusion_prompt(class_name: str) -> str:
+    """
+    Get diffusion inpainting prompt for a specific class
+    
+    Args:
+        class_name: Detected class name
+        
+    Returns:
+        Prompt string for diffusion model
+    """
+    return DIFFUSION_PROMPTS.get(class_name.lower(), DIFFUSION_PROMPTS['default'])
+
+
+def is_diffusion_enabled() -> bool:
+    """
+    Check if diffusion-based perturbation is enabled
+    
+    Returns:
+        True if diffusion is enabled and available
+    """
+    if not DIFFUSION_CONFIG['enabled']:
+        return False
+    
+    try:
+        import diffusers
+        return True
+    except ImportError:
+        print("⚠ Warning: Diffusion enabled in config but 'diffusers' package not installed.")
+        print("  Install with: pip install diffusers transformers accelerate")
+        return False
+
+
+def get_memorability_color(score: float) -> tuple:
+    """
+    Get BGR color for memorability score
+    
+    Args:
+        score: Memorability score (0-1)
+        
+    Returns:
+        BGR color tuple (b, g, r)
+    """
+    # Green (low mem) -> Yellow -> Red (high mem)
+    if score < 0.5:
+        # Green to yellow
+        r = int(score * 2 * 255)
+        g = 255
+        b = 0
+    else:
+        # Yellow to red
+        r = 255
+        g = int((1 - (score - 0.5) * 2) * 255)
+        b = 0
+    
+    return (b, g, r)  # BGR format for OpenCV
+
+
+def get_config():
+    """
+    Get default configuration for standalone usage (without args)
+    This is useful when using the memorability integration without training
+    """
+    hps = HParameters()
+    
+    # Set default values for standalone usage
+    hps.dataset_name = 'lamem'
+    hps.experiment_name = 'memorability_analysis'
+    hps.front_end_cnn = 'ResNet50FC'
+    hps.model_weights = ''
+    hps.dataset_root = 'datasets/lamem/'
+    hps.images_dir = 'images'
+    hps.splits_dir = 'splits'
+    
+    # Default image normalization
+    hps.target_mean = 0.754
+    hps.target_scale = 2.0
+    hps.img_mean = [0.485, 0.456, 0.406]
+    hps.img_std = [0.229, 0.224, 0.225]
+    
+    return hps
+
+
+# ============================================================================
+# Testing
+# ============================================================================
+
+if __name__ == "__main__":
+    # Test the configuration
+    print("Memorability Configuration Test")
+    print("=" * 70)
+    
+    # Test categories
+    print("\nMemorability Categories:")
+    test_scores = [0.2, 0.45, 0.6, 0.75, 0.9]
+    for score in test_scores:
+        category = get_memorability_category(score)
+        strategy = get_perturbation_strategy('bumper', score)
+        method = get_perturbation_method('bumper')
+        color = get_memorability_color(score)
+        print(f"  Score: {score:.2f} -> {category:12s} | Strategy: {strategy:12s} | Method: {method:10s} | Color: {color}")
+    
+    # Test perturbation methods
+    print("\nPerturbation Methods by Class:")
+    test_classes = ['sticker', 'bumper', 'door', 'hood', 'lights', 'unknown_class']
+    for cls in test_classes:
+        method = get_perturbation_method(cls)
+        ratio = get_perturbation_blend_ratio(cls)
+        prompt = get_diffusion_prompt(cls)
+        print(f"  {cls:15s} -> Method: {method:10s} | Ratio: {ratio:.2f} | Prompt: {prompt[:50]}...")
+    
+    # Test diffusion config
+    print(f"\nDiffusion Enabled: {is_diffusion_enabled()}")
+    print(f"Attention Enabled: {ATTENTION_CONFIG['enabled']}")
+    
+    # Test default config
+    print("\nDefault Configuration:")
+    hps = get_config()
+    print(f"  Dataset: {hps.dataset_name}")
+    print(f"  CNN: {hps.front_end_cnn}")
+    print(f"  Attention: {hps.use_attention}")
+    print(f"  CUDA: {hps.use_cuda}")

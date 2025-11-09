@@ -12,12 +12,13 @@ from scipy.special.basic import bi_zeros
 from torchvision import models
 from torch.autograd import Variable
 import numpy as np
+from torchvision.models import ResNet50_Weights
 
 
 class VGG16FC(nn.Module):
     def __init__(self):
         super(VGG16FC, self).__init__()
-        model = models.vgg16(pretrained=True)
+        model = models.vgg16(weights=ResNet50_Weights.DEFAULT)
         self.core_cnn = nn.Sequential(*list(model.features.children())[:-7])  # to relu5_3`
         self.D=512
         return
@@ -29,7 +30,7 @@ class VGG16FC(nn.Module):
 class ResNet18FC(nn.Module):
     def __init__(self):
         super(ResNet18FC, self).__init__()
-        self.core_cnn = models.resnet18(pretrained=True)
+        self.core_cnn = models.resnet18(weights=ResNet50_Weights.DEFAULT)
         self.D=256
         return
 
@@ -48,7 +49,7 @@ class ResNet18FC(nn.Module):
 class ResNet50FC(nn.Module):
     def __init__(self):
         super(ResNet50FC, self).__init__()
-        self.core_cnn = models.resnet50(pretrained=True)
+        self.core_cnn = models.resnet50(weights=ResNet50_Weights.DEFAULT)
         self.D = 1024
         return
 
@@ -67,7 +68,7 @@ class ResNet50FC(nn.Module):
 class ResNet101FC(nn.Module):
     def __init__(self):
         super(ResNet101FC, self).__init__()
-        self.core_cnn = models.resnet101(pretrained=True)
+        self.core_cnn = models.resnet101(weights=ResNet50_Weights.DEFAULT)
         self.D = 1024
         return
 
@@ -89,7 +90,7 @@ class ResNet101FC(nn.Module):
 class ResNet50FT(nn.Module):
     def __init__(self):
         super(ResNet50FT, self).__init__()
-        self.core_cnn = models.resnet50(pretrained=True)
+        self.core_cnn = models.resnet50(weights=ResNet50_Weights.DEFAULT)
         self.avgpool = nn.AvgPool2d(7)
         expansion = 4
         self.fc = nn.Linear(512 * expansion, 1)
@@ -155,7 +156,7 @@ class AMemNetModel(nn.Module):
 
         # LSTM
         self.rnn = nn.LSTM(input_size=self.lstm_input_size, hidden_size=self.lstm_hidden_size,
-                        num_layers=self.lstm_layers, dropout=0.5, bidirectional=False)
+                        num_layers=self.lstm_layers, dropout=0.0, bidirectional=False)
 
         # Regression Network
         self.regnet1 = nn.Linear(in_features=self.lstm_hidden_size, out_features=512)
