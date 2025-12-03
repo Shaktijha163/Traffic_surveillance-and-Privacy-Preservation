@@ -1,13 +1,15 @@
 """
-amnet_integration.py (COMPLETE FIXED VERSION - Full Temporal Consistency)
+amnet_integration.py (FIXED VERSION - Scale-Aware Temporal Consistency)
 AMNet Integration with YOLO Detection Pipeline
 Predicts memorability of detected car parts and applies diffusion-based perturbation
 
-FIXED:
-- Stores diffused crops per (track_id, class_name)
-- Reapplies cached edits every frame (paste stored crop back)
-- Pass track_id to diffusion editor
-- Accumulate edits on working frame buffer
+FIXES APPLIED:
+- Maximum bbox size limit for diffusion processing
+- Scale-aware caching (different edits for different distances)
+- Size similarity check before reusing cached crops
+- Adaptive diffusion strength based on bbox size
+- Proportional context padding
+- Fallback to lighter methods for very large bboxes
 """
 
 import cv2
@@ -24,6 +26,20 @@ from amnet import AMNet
 from config import get_config, get_memorability_category, get_perturbation_method, MEMORABILITY_THRESHOLD_HIGH
 
 from diffusion_editor import DiffusionEditor
+
+
+# ============================
+# Configuration Constants
+# ============================
+MAX_BBOX_DIMENSION = 450  # Maximum width or height for diffusion processing
+MAX_BBOX_AREA = 50000  # Maximum area for full diffusion (450*450 ~ 200k, being conservative)
+CACHE_SIZE_TOLERANCE = 0.25  # 25% size difference tolerance for cache reuse
+SCALE_BINS = {
+    'small': (0, 10000),      # Area < 10k pixels
+    'medium': (10000, 30000), # Area 10k-30k pixels
+    'large': (30000, 50000),  # Area 30k-50k pixels
+    'xlarge': (50000, float('inf'))  # Area > 50k pixels
+}
 
 
 # ============================
@@ -46,7 +62,7 @@ class MemorabilityAnalyzer:
             device: 'cuda' or 'cpu'
             attention_maps: Enable attention map visualization
         """
-        print(f"🧠 Initializing AMNet Memorability Analyzer...")
+        print(f" Initializing AMNet Memorability Analyzer...")
         
         self.device = device
         self.attention_maps_enabled = attention_maps
@@ -234,13 +250,41 @@ class MemorabilityAnalyzer:
 
 
 # ============================
-# Integrated Pipeline (FULLY FIXED)
+# Helper Functions
+# ============================
+def get_scale_bin(bbox_area: float) -> str:
+    """Determine scale bin for bbox area"""
+    for bin_name, (min_area, max_area) in SCALE_BINS.items():
+        if min_area <= bbox_area < max_area:
+            return bin_name
+    return 'xlarge'
+
+
+def compute_size_similarity(size1: Tuple[int, int], size2: Tuple[int, int]) -> float:
+    """
+    Compute size similarity between two (w, h) tuples
+    Returns relative difference (0 = identical, 1 = 100% different)
+    """
+    w1, h1 = size1
+    w2, h2 = size2
+    
+    if w1 == 0 or h1 == 0 or w2 == 0 or h2 == 0:
+        return 1.0
+    
+    w_diff = abs(w1 - w2) / max(w1, w2)
+    h_diff = abs(h1 - h2) / max(h1, h2)
+    
+    return max(w_diff, h_diff)
+
+
+# ============================
+# Integrated Pipeline (FIXED)
 # ============================
 class IntegratedMemorabilityPipeline:
     """
     Complete pipeline: Detection -> Tracking -> Memorability -> Perturbation
     
-    FIXED: Proper temporal consistency with crop caching and reapplication
+    FIXED: Scale-aware temporal consistency with intelligent caching
     """
     
     def __init__(self,
@@ -268,7 +312,7 @@ class IntegratedMemorabilityPipeline:
             num_inference_steps: Number of diffusion steps
         """
         print("\n" + "="*70)
-        print("Integrated Memorability Reduction Pipeline (FIXED VERSION)")
+        print("Integrated Memorability Reduction Pipeline ")
         print("="*70 + "\n")
         
         # Initialize detector
@@ -294,153 +338,264 @@ class IntegratedMemorabilityPipeline:
             device=device,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
-            resize_to=None,  # Optional: resize to 512 for faster processing
-            enable_caching=True  # ENABLE CACHING
+            resize_to=512,
+            enable_caching=True
         )
         
         self.memorability_threshold = memorability_threshold
         self.attention_maps = attention_maps
         
-        # ============================================================
-        # FIXED: Store actual diffused crops, not just flags
-        # ============================================================
-        self.edit_cache = {}  # {(track_id, class_name): {
-                               #     'crop': np.ndarray,
-                               #     'bbox_size': (w, h),
-                               #     'method': str,
-                               #     'mem_score': float
-                               # }}
+        # Scale-aware edit cache: {(track_id, class_name, scale_bin): {...}}
+        self.edit_cache = {}
+        
+        # Statistics
+        self.stats = {
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'skipped_large_bbox': 0,
+            'fallback_edits': 0
+        }
         
         print("✓ Pipeline initialized successfully!")
-        print("✓ Temporal consistency with crop caching ENABLED\n")
+        print("✓ Scale-aware temporal consistency ENABLED")
+        print(f"✓ Max bbox dimension: {MAX_BBOX_DIMENSION}px")
+        print(f"✓ Max bbox area: {MAX_BBOX_AREA}px²")
+        print(f"✓ Cache tolerance: {CACHE_SIZE_TOLERANCE*100}%\n")
     
     
     def process_frame(self,
-                     frame: np.ndarray,
-                     frame_idx: int,
-                     apply_perturbation: bool = True,
-                     visualize: bool = True) -> Tuple[np.ndarray, Dict]:
+                    frame: np.ndarray,
+                    frame_idx: int,
+                    apply_perturbation: bool = True,
+                    visualize: bool = True) -> Tuple[np.ndarray, Dict]:
         """
         Process single frame: detect -> track -> analyze -> perturb
-        
-        FIXED: Properly maintains temporal consistency by:
-        1. Reapplying all cached edits first
-        2. Only running diffusion on NEW high-memorability detections
-        3. Storing diffused crops for future reuse
-        
+
+        FIXED: Scale-aware caching with size similarity checks
+
         Args:
             frame: BGR image
             frame_idx: Frame number
             apply_perturbation: Apply perturbations to memorable regions
             visualize: Add visualizations
-            
+
         Returns:
             (processed_frame, statistics)
         """
         # 1. Detect objects
         detections = self.detector.detect_frame(frame)
-        
+
         # 2. Track objects
         tracks = self.tracker.update(frame, detections, frame_idx)
-        
-        # 3. Match detections with tracks (to get track_id for each detection)
+
+        # 3. Match detections with tracks
         detection_to_track = self._match_detections_to_tracks(detections, tracks)
-        
+
         # 4. Start with original frame
         result_frame = frame.copy()
-        
-        # ============================================================
-        # FIX STEP 1: Reapply ALL cached edits first
-        # This ensures previously diffused regions stay diffused
-        # ============================================================
+
+        # 5. Reapply cached edits (with size similarity check)
         cached_count = 0
+        H, W = result_frame.shape[:2]
+
         for track in tracks:
             track_id = track['track_id']
             class_name = track['class_name']
-            cache_key = (track_id, class_name)
+            x1, y1, x2, y2 = map(int, track['bbox'])
             
-            if cache_key in self.edit_cache:
-                # Get cached diffused crop
-                cached = self.edit_cache[cache_key]
-                cached_crop = cached['crop']
+            # Clamp bbox
+            x1 = max(0, min(W - 1, x1))
+            x2 = max(0, min(W, x2))
+            y1 = max(0, min(H - 1, y1))
+            y2 = max(0, min(H, y2))
+            
+            w = x2 - x1
+            h = y2 - y1
+            if w <= 0 or h <= 0:
+                continue
+            
+            # Compute scale bin
+            bbox_area = w * h
+            scale_bin = get_scale_bin(bbox_area)
+            
+            # Check cache with scale bin
+            cache_key = (track_id, class_name, scale_bin)
+            
+            if cache_key not in self.edit_cache:
+                continue
+            
+            cached = self.edit_cache[cache_key]
+            cached_crop = cached.get('crop')
+            cached_size = cached.get('bbox_size')
+            
+            if cached_crop is None or cached_size is None:
+                continue
+            
+            # Check size similarity
+            current_size = (w, h)
+            size_diff = compute_size_similarity(current_size, cached_size)
+            
+            if size_diff > CACHE_SIZE_TOLERANCE:
+                # Size too different - skip reuse
+                continue
+            
+            # Paste cached crop
+            try:
+                src_h, src_w = cached_crop.shape[:2]
                 
-                # Get current bbox
-                x1, y1, x2, y2 = track['bbox']
-                w, h = x2 - x1, y2 - y1
-                
-                # Ensure bbox is valid
-                if w <= 0 or h <= 0:
-                    continue
-                
-                # Resize cached crop to current bbox size (handles slight bbox changes)
-                if cached_crop.shape[:2] != (h, w):
-                    cached_crop_resized = cv2.resize(
-                        cached_crop, 
-                        (w, h), 
-                        interpolation=cv2.INTER_LINEAR
-                    )
+                # Resize to current bbox size
+                if (src_h, src_w) != (h, w):
+                    cached_resized = cv2.resize(cached_crop, (w, h), interpolation=cv2.INTER_LINEAR)
                 else:
-                    cached_crop_resized = cached_crop
+                    cached_resized = cached_crop
                 
-                # Paste cached diffused crop back into frame
-                try:
-                    result_frame[y1:y2, x1:x2] = cached_crop_resized
-                    cached_count += 1
-                except Exception as e:
-                    print(f"  Warning: Could not paste cached crop for T{track_id}: {e}")
+                # Safe paste
+                dst_y1, dst_y2 = y1, y2
+                dst_x1, dst_x2 = x1, x2
+                
+                src_y1 = 0
+                src_x1 = 0
+                src_y2 = src_y1 + (dst_y2 - dst_y1)
+                src_x2 = src_x1 + (dst_x2 - dst_x1)
+                
+                if dst_y1 < 0:
+                    src_y1 += -dst_y1
+                    dst_y1 = 0
+                if dst_x1 < 0:
+                    src_x1 += -dst_x1
+                    dst_x1 = 0
+                if dst_y2 > H:
+                    src_y2 -= (dst_y2 - H)
+                    dst_y2 = H
+                if dst_x2 > W:
+                    src_x2 -= (dst_x2 - W)
+                    dst_x2 = W
+                
+                final_h = dst_y2 - dst_y1
+                final_w = dst_x2 - dst_x1
+                if final_h <= 0 or final_w <= 0:
                     continue
-        
+                
+                src_region = cached_resized[src_y1:src_y1 + final_h, src_x1:src_x1 + final_w]
+                
+                if src_region.shape[0] != final_h or src_region.shape[1] != final_w:
+                    src_region = cv2.resize(src_region, (final_w, final_h), interpolation=cv2.INTER_LINEAR)
+                
+                result_frame[dst_y1:dst_y2, dst_x1:dst_x2] = src_region
+                cached_count += 1
+                self.stats['cache_hits'] += 1
+                
+            except Exception as e:
+                print(f"  Warning: Could not paste cached crop for T{track_id}: {e}")
+                continue
+
         if cached_count > 0:
             print(f"  Reapplied {cached_count} cached edits")
-        
-        # 5. Analyze memorability (for all detections)
+
+        # 6. Analyze memorability
         mem_results = self.mem_analyzer.predict_memorability_crops(frame, detections)
-        
-        # ============================================================
-        # FIX STEP 2: Find NEW high-memorability detections (not yet cached)
-        # ============================================================
+
+        # 7. Find NEW high-memorability detections
         new_high_mem = []
         for det_idx, mem_info in mem_results.items():
-            # Check if memorability is high
             if mem_info['memorability_score'] <= self.memorability_threshold:
                 continue
             
-            # Get track_id for this detection
             track_id = detection_to_track.get(det_idx)
             if track_id is None:
-                continue  # Can't cache without track_id
+                continue
             
             det = detections[det_idx]
             class_name = det['class_name']
-            cache_key = (track_id, class_name)
+            bbox = det['bbox']
+            x1, y1, x2, y2 = bbox
             
-            # Skip if already cached
+            w = x2 - x1
+            h = y2 - y1
+            bbox_area = w * h
+            scale_bin = get_scale_bin(bbox_area)
+            
+            cache_key = (track_id, class_name, scale_bin)
+            
+            # Skip if already cached for this scale
             if cache_key in self.edit_cache:
-                continue  # Already processed - don't re-edit
+                continue
             
-            # This is a NEW high-memorability detection
             new_high_mem.append({
                 'det_idx': det_idx,
                 'track_id': track_id,
                 'class_name': class_name,
                 'mem_info': mem_info,
-                'bbox': det['bbox']
+                'bbox': bbox,
+                'bbox_area': bbox_area,
+                'scale_bin': scale_bin
             })
-        
-        # ============================================================
-        # FIX STEP 3: Run diffusion on NEW high-mem detections + cache result
-        # ============================================================
+
+        # 8. Process NEW high-memorability detections
         edits = []
-        
+        skipped = 0
+        fallback = 0
+
         if apply_perturbation and len(new_high_mem) > 0:
             print(f"  Found {len(new_high_mem)} new high-memorability detections")
-            
+
             for item in new_high_mem:
                 det_idx = item['det_idx']
                 track_id = item['track_id']
                 class_name = item['class_name']
                 bbox = item['bbox']
+                bbox_area = item['bbox_area']
+                scale_bin = item['scale_bin']
                 x1, y1, x2, y2 = bbox
+                
+                w = x2 - x1
+                h = y2 - y1
+                
+                # Check if bbox is too large
+                if w > MAX_BBOX_DIMENSION or h > MAX_BBOX_DIMENSION or bbox_area > MAX_BBOX_AREA:
+                    # Use fallback: light blur
+                    print(f"    [SKIP] T{track_id} {class_name} too large ({w}x{h}), using light blur")
+                    
+                    try:
+                        # Apply light Gaussian blur
+                        x1c = max(0, min(W - 1, int(x1)))
+                        x2c = max(0, min(W, int(x2)))
+                        y1c = max(0, min(H - 1, int(y1)))
+                        y2c = max(0, min(H, int(y2)))
+                        
+                        if x2c > x1c and y2c > y1c:
+                            roi = result_frame[y1c:y2c, x1c:x2c]
+                            kernel_size = min(15, max(3, min(roi.shape[0], roi.shape[1]) // 10))
+                            if kernel_size % 2 == 0:
+                                kernel_size += 1
+                            blurred = cv2.GaussianBlur(roi, (kernel_size, kernel_size), 0)
+                            result_frame[y1c:y2c, x1c:x2c] = blurred
+                            
+                            # Cache the blurred version
+                            cache_key = (track_id, class_name, scale_bin)
+                            self.edit_cache[cache_key] = {
+                                'crop': blurred.copy(),
+                                'bbox_size': (x2c - x1c, y2c - y1c),
+                                'method': 'fallback_blur',
+                                'mem_score': item['mem_info']['memorability_score']
+                            }
+                            
+                            edits.append({
+                                'track_id': track_id,
+                                'bbox': bbox,
+                                'class_name': class_name,
+                                'method': 'fallback_blur',
+                                'mem_score': item['mem_info']['memorability_score']
+                            })
+                            
+                            fallback += 1
+                            self.stats['fallback_edits'] += 1
+                    except Exception as e:
+                        print(f"    Error applying blur fallback: {e}")
+                    
+                    skipped += 1
+                    self.stats['skipped_large_bbox'] += 1
+                    continue
                 
                 # Validate bbox
                 if x2 <= x1 or y2 <= y1:
@@ -450,7 +605,10 @@ class IntegratedMemorabilityPipeline:
                 single_det = [detections[det_idx]]
                 single_mem = {0: item['mem_info']}
                 
-                # Run diffusion on result_frame (which may already have other edits)
+                # Compute adaptive strength based on bbox size
+                strength = self._compute_adaptive_strength(bbox_area)
+                
+                # Run diffusion
                 try:
                     edited_frame, edit_info = self.diffusion_editor.edit_frame(
                         frame_bgr=result_frame,
@@ -458,21 +616,31 @@ class IntegratedMemorabilityPipeline:
                         mem_results=single_mem,
                         mem_threshold=self.memorability_threshold,
                         process_entire_bbox=True,
-                        pad=2
+                        pad=2,
+                        strength=strength  # Pass adaptive strength
                     )
                     
                     if len(edit_info) > 0:
                         # Update working frame
                         result_frame = edited_frame
                         
-                        # Extract the diffused crop from the edited frame
-                        diffused_crop = result_frame[y1:y2, x1:x2].copy()
+                        # Extract and cache the edited crop
+                        Hf, Wf = result_frame.shape[:2]
+                        x1c = max(0, min(Wf - 1, int(x1)))
+                        x2c = max(0, min(Wf, int(x2)))
+                        y1c = max(0, min(Hf - 1, int(y1)))
+                        y2c = max(0, min(Hf, int(y2)))
                         
-                        # Cache the diffused crop for future frames
-                        cache_key = (track_id, class_name)
+                        if x2c <= x1c or y2c <= y1c:
+                            continue
+                        
+                        diffused_crop = result_frame[y1c:y2c, x1c:x2c].copy()
+                        
+                        # Cache with scale bin
+                        cache_key = (track_id, class_name, scale_bin)
                         self.edit_cache[cache_key] = {
                             'crop': diffused_crop,
-                            'bbox_size': (x2 - x1, y2 - y1),
+                            'bbox_size': (x2c - x1c, y2c - y1c),
                             'method': edit_info[0]['method'],
                             'mem_score': item['mem_info']['memorability_score']
                         }
@@ -480,17 +648,20 @@ class IntegratedMemorabilityPipeline:
                         # Record edit
                         edit = edit_info[0]
                         edit['track_id'] = track_id
+                        edit['scale_bin'] = scale_bin
                         edits.append(edit)
                         
-                        print(f"    [NEW] T{track_id} {class_name} "
+                        self.stats['cache_misses'] += 1
+                        
+                        print(f"    [NEW] T{track_id} {class_name} ({scale_bin}) "
                               f"(mem={item['mem_info']['memorability_score']:.3f}) "
                               f"- {edit_info[0]['method']}")
                 
                 except Exception as e:
                     print(f"  Error processing T{track_id} {class_name}: {e}")
                     continue
-        
-        # 6. Visualize (if enabled)
+
+        # 9. Visualize (if enabled)
         if visualize:
             result_frame = self._visualize_results(
                 result_frame,
@@ -500,22 +671,39 @@ class IntegratedMemorabilityPipeline:
                 new_high_mem,
                 edits
             )
-        
-        # 7. Statistics
+
+        # 10. Statistics
         stats = {
             'total_detections': len(detections),
             'total_tracks': len(tracks),
             'high_memorability_count': len(new_high_mem),
-            'avg_memorability': np.mean([m['memorability_score'] 
+            'avg_memorability': np.mean([m['memorability_score']
                                         for m in mem_results.values()]) if mem_results else 0,
             'cached_edits_applied': cached_count,
             'new_edits': len(edits),
-            'edits_applied': len(edits),  # For backward compatibility with video_pipeline.py
+            'edits_applied': len(edits),
             'cache_size': len(self.edit_cache),
+            'skipped_large_bbox': skipped,
+            'fallback_edits': fallback,
             'edit_details': edits
         }
-        
+
         return result_frame, stats
+    
+    
+    def _compute_adaptive_strength(self, bbox_area: float) -> float:
+        """
+        Compute adaptive diffusion strength based on bbox size
+        Larger bboxes get lower strength for more subtle edits
+        """
+        if bbox_area > 40000:
+            return 0.5  # Very subtle for large regions
+        elif bbox_area > 25000:
+            return 0.6
+        elif bbox_area > 15000:
+            return 0.7
+        else:
+            return 0.8  # Default strength for small regions
     
     
     def _match_detections_to_tracks(self, 
@@ -662,16 +850,29 @@ class IntegratedMemorabilityPipeline:
             return {
                 'cache_size': 0,
                 'cached_tracks': 0,
-                'cached_part_types': 0
+                'cached_part_types': 0,
+                'cache_hits': self.stats['cache_hits'],
+                'cache_misses': self.stats['cache_misses'],
+                'skipped_large_bbox': self.stats['skipped_large_bbox'],
+                'fallback_edits': self.stats['fallback_edits']
             }
         
         cached_tracks = set(k[0] for k in self.edit_cache.keys())
         cached_parts = set(k[1] for k in self.edit_cache.keys())
+        scale_distribution = {}
+        for k in self.edit_cache.keys():
+            scale_bin = k[2]
+            scale_distribution[scale_bin] = scale_distribution.get(scale_bin, 0) + 1
         
         return {
             'cache_size': len(self.edit_cache),
             'cached_tracks': len(cached_tracks),
-            'cached_part_types': len(cached_parts)
+            'cached_part_types': len(cached_parts),
+            'scale_distribution': scale_distribution,
+            'cache_hits': self.stats['cache_hits'],
+            'cache_misses': self.stats['cache_misses'],
+            'skipped_large_bbox': self.stats['skipped_large_bbox'],
+            'fallback_edits': self.stats['fallback_edits']
         }
 
 
@@ -733,6 +934,8 @@ def test_memorability_integration():
                 print(f"  Cached edits applied: {stats['cached_edits_applied']}")
                 print(f"  New edits: {stats['new_edits']}")
                 print(f"  Cache size: {stats['cache_size']}")
+                print(f"  Skipped (large bbox): {stats['skipped_large_bbox']}")
+                print(f"  Fallback edits: {stats['fallback_edits']}")
                 
                 # Save
                 output_path = f"results/memorability_test_{idx}.jpg"
@@ -743,11 +946,16 @@ def test_memorability_integration():
             # Print final cache stats
             cache_stats = pipeline.get_cache_stats()
             print(f"\n{'='*60}")
-            print("📦 Final Cache Statistics:")
+            print(" Final Cache Statistics:")
             print('='*60)
             print(f"  Total cached entries: {cache_stats['cache_size']}")
             print(f"  Unique tracks cached: {cache_stats['cached_tracks']}")
             print(f"  Part types cached: {cache_stats['cached_part_types']}")
+            print(f"  Scale distribution: {cache_stats['scale_distribution']}")
+            print(f"  Cache hits: {cache_stats['cache_hits']}")
+            print(f"  Cache misses: {cache_stats['cache_misses']}")
+            print(f"  Skipped large bbox: {cache_stats['skipped_large_bbox']}")
+            print(f"  Fallback edits: {cache_stats['fallback_edits']}")
             
             print("\n✓ Test complete!")
             return True

@@ -2,6 +2,11 @@
 video_pipeline.py
 Process video: Output both original (annotated) and perturbed versions
 Plus optional side-by-side comparison
+
+FIXES APPLIED:
+- Enhanced statistics tracking
+- Better progress reporting
+- Improved cache statistics display
 """
 
 import cv2
@@ -22,7 +27,7 @@ class VideoPipeline:
     
     def __init__(self,
                  yolo_model_path: str = "models/best.pt",
-                 amnet_model_path: str = "models/amnet_weights.pth",
+                 amnet_model_path: str = "models/amnet_weights.pkl",
                  device: str = "cuda",
                  memorability_threshold: float = 0.6):
         
@@ -133,7 +138,12 @@ class VideoPipeline:
             'total_detections': 0,
             'total_high_mem': 0,
             'total_edits': 0,
-            'processing_time': 0
+            'total_cached_edits': 0,
+            'total_skipped_large': 0,
+            'total_fallback': 0,
+            'processing_time': 0,
+            'avg_memorability': 0,
+            'memorability_sum': 0
         }
         
         frame_idx = 0
@@ -186,6 +196,19 @@ class VideoPipeline:
                 cv2.putText(comparison_frame, "PERTURBED (Diffusion Applied)", 
                            (width + 10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
                 
+                # Add frame statistics overlay
+                info_y = height - 150
+                cv2.putText(comparison_frame, f"Frame: {frame_idx + 1}/{frames_to_process}", 
+                           (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(comparison_frame, f"Detections: {stats_pert['total_detections']}", 
+                           (10, info_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(comparison_frame, f"High-Mem: {stats_pert['high_memorability_count']}", 
+                           (10, info_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(comparison_frame, f"Edits: {stats_pert['edits_applied']}", 
+                           (10, info_y + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(comparison_frame, f"Cached: {stats_pert['cached_edits_applied']}", 
+                           (10, info_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
                 writers['comparison'].write(comparison_frame)
             
             # Update statistics
@@ -193,7 +216,11 @@ class VideoPipeline:
             stats['total_detections'] += stats_pert['total_detections']
             stats['total_high_mem'] += stats_pert['high_memorability_count']
             stats['total_edits'] += stats_pert['edits_applied']
+            stats['total_cached_edits'] += stats_pert.get('cached_edits_applied', 0)
+            stats['total_skipped_large'] += stats_pert.get('skipped_large_bbox', 0)
+            stats['total_fallback'] += stats_pert.get('fallback_edits', 0)
             stats['processing_time'] += frame_time
+            stats['memorability_sum'] += stats_pert['avg_memorability']
             
             # Progress update every 30 frames
             if frame_idx % 30 == 0 or frame_idx == frames_to_process - 1:
@@ -204,9 +231,11 @@ class VideoPipeline:
                 progress = ((frame_idx + 1) / frames_to_process) * 100
                 
                 print(f"  Frame {frame_idx + 1}/{frames_to_process} ({progress:.1f}%) | "
-                      f"Detections: {stats_pert['total_detections']} | "
+                      f"Det: {stats_pert['total_detections']} | "
                       f"High-mem: {stats_pert['high_memorability_count']} | "
                       f"Edits: {stats_pert['edits_applied']} | "
+                      f"Cached: {stats_pert.get('cached_edits_applied', 0)} | "
+                      f"Skip: {stats_pert.get('skipped_large_bbox', 0)} | "
                       f"Speed: {fps_proc:.1f} fps | "
                       f"ETA: {eta:.0f}s")
             
@@ -219,6 +248,10 @@ class VideoPipeline:
         
         total_time = time.time() - start_time
         avg_fps = stats['total_frames'] / total_time if total_time > 0 else 0
+        avg_mem = stats['memorability_sum'] / stats['total_frames'] if stats['total_frames'] > 0 else 0
+        
+        # Get final cache statistics
+        cache_stats = self.pipeline.get_cache_stats()
         
         # Print final statistics
         print(f"\n{'='*80}")
@@ -230,17 +263,38 @@ class VideoPipeline:
         print(f"   Total detections: {stats['total_detections']}")
         print(f"   High memorability detections: {stats['total_high_mem']}")
         print(f"   Total edits applied: {stats['total_edits']}")
+        print(f"   Cached edits reused: {stats['total_cached_edits']}")
+        print(f"   Large bbox skipped: {stats['total_skipped_large']}")
+        print(f"   Fallback edits: {stats['total_fallback']}")
+        print(f"   Average memorability: {avg_mem:.3f}")
         print(f"   Processing time: {total_time:.1f}s")
         print(f"   Average speed: {avg_fps:.2f} fps")
         print(f"   Time per frame: {stats['processing_time']/stats['total_frames']:.3f}s\n")
         
-        print(f"✅ Output files saved to: {output_dir}/")
+        print(f"📦 Cache Statistics:")
+        print(f"   Cache size: {cache_stats['cache_size']} entries")
+        print(f"   Unique tracks: {cache_stats['cached_tracks']}")
+        print(f"   Part types: {cache_stats['cached_part_types']}")
+        if 'scale_distribution' in cache_stats:
+            print(f"   Scale distribution: {cache_stats['scale_distribution']}")
+        print(f"   Cache hits: {cache_stats.get('cache_hits', 0)}")
+        print(f"   Cache misses: {cache_stats.get('cache_misses', 0)}")
+        print(f"   Skipped large bbox: {cache_stats.get('skipped_large_bbox', 0)}")
+        print(f"   Fallback edits: {cache_stats.get('fallback_edits', 0)}\n")
+        
+        print(f"💾 Output files saved to: {output_dir}/")
         if save_original:
             print(f"   - {video_path.stem}_original_annotated.mp4")
         if save_perturbed:
             print(f"   - {video_path.stem}_perturbed.mp4")
         if create_comparison:
             print(f"   - {video_path.stem}_comparison.mp4  ⭐ RECOMMENDED FOR REVIEW\n")
+        
+        # Add stats to return dict
+        stats['avg_memorability'] = avg_mem
+        stats['avg_fps'] = avg_fps
+        stats['total_time'] = total_time
+        stats['cache_stats'] = cache_stats
         
         return stats
 
@@ -292,9 +346,9 @@ def main():
     )
     
     if stats:
-        print("\n✨ Video processing complete!\n")
+        print("\n Video processing complete!\n")
     else:
-        print("\n❌ Video processing failed.\n")
+        print("\n Video processing failed.\n")
 
 
 if __name__ == "__main__":
