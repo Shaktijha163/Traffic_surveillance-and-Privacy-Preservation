@@ -35,6 +35,7 @@ perturbation_output/
 sticker_dataset/
 results/
 old_codes/
+RAFT/
 
 # Model & large binary files
 *.pth

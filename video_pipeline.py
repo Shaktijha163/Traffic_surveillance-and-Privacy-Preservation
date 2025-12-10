@@ -1,355 +1,162 @@
 """
 video_pipeline.py
-Process video: Output both original (annotated) and perturbed versions
-Plus optional side-by-side comparison
-
-FIXES APPLIED:
-- Enhanced statistics tracking
-- Better progress reporting
-- Improved cache statistics display
+Video processing loop optimized for Batched Video Diffusion
+Outputs:
+1. Clean Diffusion Video (Just the edits)
+2. Visualization Video (Edits + Bounding Boxes + Heatmaps)
+3. Comparison Video (Split screen: Original vs Clean Diffusion)
 """
-
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Optional
 import time
-from amnet_integration import IntegratedMemorabilityPipeline
+import argparse
+from amnet_integration import AdvancedMemorabilityPipeline
 
-
-class VideoPipeline:
-    """
-    Video processing pipeline that outputs:
-    1. Original video with annotations
-    2. Perturbed video with annotations
-    3. Side-by-side comparison (optional)
-    """
-    
-    def __init__(self,
-                 yolo_model_path: str = "models/best.pt",
-                 amnet_model_path: str = "models/amnet_weights.pkl",
-                 device: str = "cuda",
-                 memorability_threshold: float = 0.6):
+class AdvancedVideoPipeline:
+    def __init__(self, yolo_model_path="models/best.pt", amnet_model_path="models/amnet_weights.pkl", 
+                 device="cuda", memorability_threshold=0.6, use_lcm=True):
         
-        print(f"\n{'='*80}")
-        print("Video Processing Pipeline - Initialization")
-        print(f"{'='*80}\n")
-        
-        # Initialize pipeline (loads models once)
-        self.pipeline = IntegratedMemorabilityPipeline(
-            yolo_model_path=yolo_model_path,
-            amnet_model_path=amnet_model_path,
+        self.pipeline = AdvancedMemorabilityPipeline(
+            yolo_model_path=yolo_model_path, 
+            amnet_model_path=amnet_model_path, 
             device=device,
-            memorability_threshold=memorability_threshold,
-            attention_maps=True
+            memorability_threshold=memorability_threshold, 
+            attention_maps=True,
+            use_lcm=use_lcm
         )
+        # AnimateDiff works best with 16 frames context. 
+        # We use a multiple of 16 (e.g., 32) for efficiency.
+        self.batch_size = 32 
         
-        print("✓ Video pipeline ready!\n")
-    
-    
-    def process_video(self,
-                     video_path: str,
-                     output_dir: str = "results/video_output",
-                     max_frames: Optional[int] = None,
-                     create_comparison: bool = True,
-                     save_original: bool = True,
-                     save_perturbed: bool = True):
-        """
-        Process video and save outputs
-        
-        Args:
-            video_path: Path to input video
-            output_dir: Output directory
-            max_frames: Process only first N frames (None = all frames)
-            create_comparison: Create side-by-side comparison video
-            save_original: Save original video with annotations
-            save_perturbed: Save perturbed video
-        
-        Returns:
-            Dictionary with statistics
-        """
-        
+    def process_video(self, video_path, output_dir="results/output", max_frames=None):
         video_path = Path(video_path)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
         if not video_path.exists():
-            print(f"❌ Error: Video not found: {video_path}")
+            print(f" Error: Video not found: {video_path}")
             return None
-        
-        print(f"\n{'='*80}")
-        print(f"Processing Video: {video_path.name}")
-        print(f"{'='*80}\n")
-        
-        # Open video
+            
+        # --- Setup Inputs ---
         cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            print(f"❌ Error: Could not open video")
-            return None
-        
-        # Get video properties
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Limit frames if specified
-        if max_frames is not None:
-            frames_to_process = min(max_frames, total_frames)
-        else:
-            frames_to_process = total_frames
+        frames_to_process = min(max_frames, total_frames) if max_frames else total_frames
         
-        print(f"📊 Video Information:")
-        print(f"   Resolution: {width}x{height}")
-        print(f"   FPS: {fps}")
-        print(f"   Total frames: {total_frames}")
-        print(f"   Frames to process: {frames_to_process}")
-        print(f"   Duration: {total_frames/fps:.1f}s (processing {frames_to_process/fps:.1f}s)\n")
+        # --- Setup Writers ---
+        # 1. Clean output: Shows ONLY the diffusion edits
+        out_path_clean = output_dir / f"{video_path.stem}_clean.mp4"
         
-        # Create video writers
+        # 2. Visualized output: Shows boxes, heatmaps, and stats overlay
+        out_path_viz = output_dir / f"{video_path.stem}_visualized.mp4"
+        
+        # 3. Comparison output: Left (Original) | Right (Clean Edit)
+        out_path_comp = output_dir / f"{video_path.stem}_comparison.mp4"
+        
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         
-        writers = {}
+        writer_clean = cv2.VideoWriter(str(out_path_clean), fourcc, fps, (width, height))
+        writer_viz = cv2.VideoWriter(str(out_path_viz), fourcc, fps, (width, height))
+        writer_comp = cv2.VideoWriter(str(out_path_comp), fourcc, fps, (width * 2, height))
         
-        if save_original:
-            original_path = output_dir / f"{video_path.stem}_original_annotated.mp4"
-            writers['original'] = cv2.VideoWriter(
-                str(original_path), fourcc, fps, (width, height)
-            )
-            print(f"✓ Will save original (annotated): {original_path}")
+        print(f" Processing {frames_to_process} frames in batches of {self.batch_size}...")
+        print(f"   Outputs will be saved to: {output_dir}")
         
-        if save_perturbed:
-            perturbed_path = output_dir / f"{video_path.stem}_perturbed.mp4"
-            writers['perturbed'] = cv2.VideoWriter(
-                str(perturbed_path), fourcc, fps, (width, height)
-            )
-            print(f"✓ Will save perturbed: {perturbed_path}")
-        
-        if create_comparison:
-            comparison_path = output_dir / f"{video_path.stem}_comparison.mp4"
-            writers['comparison'] = cv2.VideoWriter(
-                str(comparison_path), fourcc, fps, (width * 2, height)
-            )
-            print(f"✓ Will save comparison: {comparison_path}\n")
-        
-        # Processing statistics
-        stats = {
-            'total_frames': 0,
-            'total_detections': 0,
-            'total_high_mem': 0,
-            'total_edits': 0,
-            'total_cached_edits': 0,
-            'total_skipped_large': 0,
-            'total_fallback': 0,
-            'processing_time': 0,
-            'avg_memorability': 0,
-            'memorability_sum': 0
-        }
-        
-        frame_idx = 0
+        processed_count = 0
         start_time = time.time()
         
-        print(f"{'='*80}")
-        print("Processing frames...")
-        print(f"{'='*80}\n")
-        
-        # Process frames
-        while frame_idx < frames_to_process:
-            ret, frame = cap.read()
-            if not ret:
+        while processed_count < frames_to_process:
+            # 1. Read a batch of frames
+            current_batch = []
+            while len(current_batch) < self.batch_size and processed_count + len(current_batch) < frames_to_process:
+                ret, frame = cap.read()
+                if not ret: break
+                current_batch.append(frame)
+            
+            if not current_batch:
                 break
-            
-            frame_start = time.time()
-            
-            # Process WITHOUT perturbation (for original video)
-            original_annotated, stats_orig = self.pipeline.process_frame(
-                frame.copy(),
-                frame_idx=frame_idx,
-                apply_perturbation=False,
-                visualize=True
-            )
-            
-            # Process WITH perturbation
-            perturbed_annotated, stats_pert = self.pipeline.process_frame(
-                frame.copy(),
-                frame_idx=frame_idx,
-                apply_perturbation=True,
-                visualize=False
-            )
-            
-            frame_time = time.time() - frame_start
-            
-            # Write to output videos
-            if 'original' in writers:
-                writers['original'].write(original_annotated)
-            
-            if 'perturbed' in writers:
-                writers['perturbed'].write(perturbed_annotated)
-            
-            if 'comparison' in writers:
-                # Create side-by-side comparison
-                comparison_frame = np.hstack([original_annotated, perturbed_annotated])
                 
-                # Add labels
-                cv2.putText(comparison_frame, "ORIGINAL (Annotated)", 
-                           (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
-                cv2.putText(comparison_frame, "PERTURBED (Diffusion Applied)", 
-                           (width + 10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-                
-                # Add frame statistics overlay
-                info_y = height - 150
-                cv2.putText(comparison_frame, f"Frame: {frame_idx + 1}/{frames_to_process}", 
-                           (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(comparison_frame, f"Detections: {stats_pert['total_detections']}", 
-                           (10, info_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(comparison_frame, f"High-Mem: {stats_pert['high_memorability_count']}", 
-                           (10, info_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(comparison_frame, f"Edits: {stats_pert['edits_applied']}", 
-                           (10, info_y + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(comparison_frame, f"Cached: {stats_pert['cached_edits_applied']}", 
-                           (10, info_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                
-                writers['comparison'].write(comparison_frame)
-            
-            # Update statistics
-            stats['total_frames'] += 1
-            stats['total_detections'] += stats_pert['total_detections']
-            stats['total_high_mem'] += stats_pert['high_memorability_count']
-            stats['total_edits'] += stats_pert['edits_applied']
-            stats['total_cached_edits'] += stats_pert.get('cached_edits_applied', 0)
-            stats['total_skipped_large'] += stats_pert.get('skipped_large_bbox', 0)
-            stats['total_fallback'] += stats_pert.get('fallback_edits', 0)
-            stats['processing_time'] += frame_time
-            stats['memorability_sum'] += stats_pert['avg_memorability']
-            
-            # Progress update every 30 frames
-            if frame_idx % 30 == 0 or frame_idx == frames_to_process - 1:
-                elapsed = time.time() - start_time
-                fps_proc = (frame_idx + 1) / elapsed if elapsed > 0 else 0
-                eta = (frames_to_process - frame_idx - 1) / fps_proc if fps_proc > 0 else 0
-                
-                progress = ((frame_idx + 1) / frames_to_process) * 100
-                
-                print(f"  Frame {frame_idx + 1}/{frames_to_process} ({progress:.1f}%) | "
-                      f"Det: {stats_pert['total_detections']} | "
-                      f"High-mem: {stats_pert['high_memorability_count']} | "
-                      f"Edits: {stats_pert['edits_applied']} | "
-                      f"Cached: {stats_pert.get('cached_edits_applied', 0)} | "
-                      f"Skip: {stats_pert.get('skipped_large_bbox', 0)} | "
-                      f"Speed: {fps_proc:.1f} fps | "
-                      f"ETA: {eta:.0f}s")
-            
-            frame_idx += 1
-        
-        # Cleanup
-        cap.release()
-        for writer in writers.values():
-            writer.release()
-        
-        total_time = time.time() - start_time
-        avg_fps = stats['total_frames'] / total_time if total_time > 0 else 0
-        avg_mem = stats['memorability_sum'] / stats['total_frames'] if stats['total_frames'] > 0 else 0
-        
-        # Get final cache statistics
-        cache_stats = self.pipeline.get_cache_stats()
-        
-        # Print final statistics
-        print(f"\n{'='*80}")
-        print("Processing Complete!")
-        print(f"{'='*80}\n")
-        
-        print(f"📊 Final Statistics:")
-        print(f"   Frames processed: {stats['total_frames']}")
-        print(f"   Total detections: {stats['total_detections']}")
-        print(f"   High memorability detections: {stats['total_high_mem']}")
-        print(f"   Total edits applied: {stats['total_edits']}")
-        print(f"   Cached edits reused: {stats['total_cached_edits']}")
-        print(f"   Large bbox skipped: {stats['total_skipped_large']}")
-        print(f"   Fallback edits: {stats['total_fallback']}")
-        print(f"   Average memorability: {avg_mem:.3f}")
-        print(f"   Processing time: {total_time:.1f}s")
-        print(f"   Average speed: {avg_fps:.2f} fps")
-        print(f"   Time per frame: {stats['processing_time']/stats['total_frames']:.3f}s\n")
-        
-        print(f"📦 Cache Statistics:")
-        print(f"   Cache size: {cache_stats['cache_size']} entries")
-        print(f"   Unique tracks: {cache_stats['cached_tracks']}")
-        print(f"   Part types: {cache_stats['cached_part_types']}")
-        if 'scale_distribution' in cache_stats:
-            print(f"   Scale distribution: {cache_stats['scale_distribution']}")
-        print(f"   Cache hits: {cache_stats.get('cache_hits', 0)}")
-        print(f"   Cache misses: {cache_stats.get('cache_misses', 0)}")
-        print(f"   Skipped large bbox: {cache_stats.get('skipped_large_bbox', 0)}")
-        print(f"   Fallback edits: {cache_stats.get('fallback_edits', 0)}\n")
-        
-        print(f"💾 Output files saved to: {output_dir}/")
-        if save_original:
-            print(f"   - {video_path.stem}_original_annotated.mp4")
-        if save_perturbed:
-            print(f"   - {video_path.stem}_perturbed.mp4")
-        if create_comparison:
-            print(f"   - {video_path.stem}_comparison.mp4  ⭐ RECOMMENDED FOR REVIEW\n")
-        
-        # Add stats to return dict
-        stats['avg_memorability'] = avg_mem
-        stats['avg_fps'] = avg_fps
-        stats['total_time'] = total_time
-        stats['cache_stats'] = cache_stats
-        
-        return stats
+            batch_start_idx = processed_count
+            print(f"\n Batch Loaded: Frames {batch_start_idx} to {batch_start_idx + len(current_batch)}")
 
+            # 2. Process the batch
+            try:
+                # We work on copies to preserve originals logic if needed
+                batch_to_process = [f.copy() for f in current_batch]
+                
+                # Unpack the THREE return values from amnet_integration
+                clean_batch, viz_batch, batch_stats = self.pipeline.process_transfer_batch(
+                    batch_to_process, 
+                    start_frame_idx=batch_start_idx
+                )
+                
+                # 3. Write results
+                for i in range(len(clean_batch)):
+                    original_frame = current_batch[i]
+                    clean_frame = clean_batch[i]
+                    viz_frame = viz_batch[i]
+                    
+                    # 1. Save CLEAN edit
+                    writer_clean.write(clean_frame)
+                    
+                    # 2. Save VISUALIZED edit
+                    writer_viz.write(viz_frame)
+                    
+                    # 3. Save COMPARISON (Left: Original, Right: Clean Edit)
+                    # Add simple labels
+                    cv2.putText(original_frame, "ORIGINAL", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    cv2.putText(clean_frame, "DIFFUSION EDIT", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    
+                    comparison_frame = np.hstack([original_frame, clean_frame])
+                    writer_comp.write(comparison_frame)
+                
+                processed_count += len(current_batch)
+                
+            except Exception as e:
+                print(f" Batch Failed: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback: Write original frames if diffusion fails to keep video length correct
+                for frame in current_batch:
+                    writer_clean.write(frame)
+                    writer_viz.write(frame)
+                    dbl_frame = np.hstack([frame, frame])
+                    writer_comp.write(dbl_frame)
+                processed_count += len(current_batch)
+
+            # Clear VRAM after every batch to prevent leaks
+            self.pipeline.clear_cache()
+            
+        cap.release()
+        writer_clean.release()
+        writer_viz.release()
+        writer_comp.release()
+        
+        elapsed = time.time() - start_time
+        print(f"\n Processing Complete!")
+        print(f"    Clean Video:  {out_path_clean}")
+        print(f"    Debug Video:  {out_path_viz}")
+        print(f"    Comparison:   {out_path_comp}")
+        print(f"    Time taken: {elapsed:.2f}s ({processed_count/elapsed:.2f} fps)")
 
 def main():
-    """Main execution with examples"""
-    
-    import argparse
-    
-    parser = argparse.ArgumentParser(
-        description='Video Processing Pipeline with Memorability Reduction'
-    )
-    parser.add_argument('--video', type=str, required=True,
-                       help='Path to input video')
-    parser.add_argument('--output', type=str, default='results/video_output',
-                       help='Output directory')
-    parser.add_argument('--frames', type=int, default=None,
-                       help='Process only first N frames (default: all)')
-    parser.add_argument('--no-comparison', action='store_true',
-                       help='Skip creating comparison video')
-    parser.add_argument('--no-original', action='store_true',
-                       help='Skip saving original video')
-    parser.add_argument('--no-perturbed', action='store_true',
-                       help='Skip saving perturbed video')
-    parser.add_argument('--threshold', type=float, default=0.6,
-                       help='Memorability threshold (default: 0.6)')
-    parser.add_argument('--device', type=str, default='cuda',
-                       choices=['cuda', 'cpu'],
-                       help='Device to use (default: cuda)')
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--video', type=str, required=True)
+    parser.add_argument('--frames', type=int, default=None)
+    parser.add_argument('--use-lcm', action='store_true', default=True, help="Use LCM for faster inference")
     args = parser.parse_args()
     
-    # Initialize pipeline
-    pipeline = VideoPipeline(
+    pipeline = AdvancedVideoPipeline(
         yolo_model_path="models/best.pt",
         amnet_model_path="models/amnet_weights.pkl",
-        device=args.device,
-        memorability_threshold=args.threshold
+        use_lcm=args.use_lcm
     )
     
-    # Process video
-    stats = pipeline.process_video(
-        video_path=args.video,
-        output_dir=args.output,
-        max_frames=args.frames,
-        create_comparison=not args.no_comparison,
-        save_original=not args.no_original,
-        save_perturbed=not args.no_perturbed
-    )
-    
-    if stats:
-        print("\n Video processing complete!\n")
-    else:
-        print("\n Video processing failed.\n")
-
+    pipeline.process_video(args.video, max_frames=args.frames)
 
 if __name__ == "__main__":
     main()

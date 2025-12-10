@@ -1,381 +1,286 @@
-"""
-diffusion_editor.py (FIXED VERSION - Adaptive Strength Support)
-Diffusion-based editor for reducing memorability of detected regions.
-
-FIXES APPLIED:
-- Support for adaptive strength parameter
-- Proportional context padding based on bbox size
-- Better error handling and fallbacks
-- Optimized processing for different bbox sizes
-"""
-
-from typing import List, Dict, Tuple, Optional
+import torch
+import torch.nn.functional as F
+import numpy as np
+import cv2
+import sys
+import os
+import argparse
+import random
 from pathlib import Path
-import math
+from typing import List, Dict, Tuple, Optional
+from PIL import Image
 import warnings
 
-import numpy as np
-from PIL import Image, ImageDraw
-import cv2
-import torch
-
-# Attempt to import diffusers / StableDiffusionInpaintPipeline
+# --- DIFFUSERS & ANIMATEDIFF IMPORTS ---
 try:
-    from diffusers import StableDiffusionInpaintPipeline, DPMSolverMultistepScheduler
-    _HAS_DIFFUSERS = True
-except Exception:
-    _HAS_DIFFUSERS = False
+    from diffusers import MotionAdapter, AnimateDiffVideoToVideoPipeline, LCMScheduler
+    from diffusers.utils import export_to_gif
+    HAS_DIFFUSERS = True
+except ImportError:
+    HAS_DIFFUSERS = False
+    warnings.warn("diffusers/peft not installed. Install: pip install diffusers transformers accelerate peft")
 
-
-def _ensure_bbox_in_bounds(bbox: Tuple[int, int, int, int], img_w: int, img_h: int):
-    """Ensure bbox coordinates are within image bounds"""
-    x1, y1, x2, y2 = bbox
-    x1 = max(0, min(img_w - 1, int(x1)))
-    y1 = max(0, min(img_h - 1, int(y1)))
-    x2 = max(0, min(img_w, int(x2)))
-    y2 = max(0, min(img_h, int(y2)))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2, y2)
-
-
-def _create_bbox_mask(image_size: Tuple[int, int], bbox: Tuple[int, int, int, int], pad: int = 8):
-    """
-    Create a binary mask PIL Image (white inside bbox, black outside).
-    pad: expand bbox by some pixels to avoid hard edges artifacts.
-    """
-    w, h = image_size
-    x1, y1, x2, y2 = bbox
-    x1 = max(0, x1 - pad)
-    y1 = max(0, y1 - pad)
-    x2 = min(w, x2 + pad)
-    y2 = min(h, y2 + pad)
-    mask = Image.new("L", (w, h), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rectangle([x1, y1, x2, y2], fill=255)
-    return mask
-
-
-def _pil_from_bgr(bgr: np.ndarray) -> Image.Image:
-    """Convert BGR numpy array to PIL Image"""
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(rgb)
-
-
-def _bgr_from_pil(pil_img: Image.Image) -> np.ndarray:
-    """Convert PIL Image to BGR numpy array"""
-    arr = np.array(pil_img)
-    bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    return bgr
-
-
-# ============================
-# DiffusionEditor Class
-# ============================
-
-class DiffusionEditor:
-    """
-    Enhanced diffusion editor with adaptive strength and intelligent processing
-    
-    FEATURES:
-    - Adaptive diffusion strength based on bbox size
-    - Proportional context padding
-    - Optimized processing for different scales
-    - Robust error handling with fallbacks
-    """
-
-    CLASS_PROMPT_MAP = {
-        'sticker': "plain car surface, no text, no stickers, photorealistic",
-        'bumper': "generic car bumper, plain, no logos, photorealistic",
-        'door': "generic car door, plain surface, no logos, photorealistic",
-        'hood': "generic car hood, smooth surface, no logos, photorealistic",
-        'car_hood': "generic car hood, smooth surface, no logos, photorealistic",
-        'windshield': "generic car windshield, clear glass, photorealistic",
-        'lights': "generic car headlight, standard design, photorealistic",
-        'fender': "generic car fender, smooth surface, no logos, photorealistic",
-        'mirror': "generic car mirror, plain design, photorealistic",
-        'default': "generic car part, plain appearance, no logos, photorealistic"
+class AdvancedTemporalVideoEditor:
+    CLASS_PROMPTS = {
+        # DEBUG MODE: Use distinct textures to verify it works
+        'sticker': "carbon fiber texture, high contrast, pattern, 4k",
+        'bumper': "shiny chrome bumper, metallic reflection, silver, 4k",
+        'door': "rusty metal door, old paint, weathered, texture, 4k",
+        'hood': "carbon fiber car hood, black woven pattern, racing style, 4k",
+        'fender': "matte black fender, smooth, 4k",
+        'default': "shiny chrome car part, metallic, 4k"
     }
 
-    def __init__(self,
-                 device: str = "cuda",
-                 model_id: str = "stabilityai/stable-diffusion-2-inpainting",
-                 guidance_scale: float = 7.5,
-                 num_inference_steps: int = 25,
-                 resize_to: Optional[int] = 512,
-                 enable_caching: bool = True):
-        """
-        Initialize diffusion editor
-        
-        Args:
-            device: 'cuda' or 'cpu'
-            model_id: Hugging Face model ID for inpainting
-            guidance_scale: CFG scale
-            num_inference_steps: Number of diffusion steps
-            resize_to: Resize images to this size (None = keep original)
-            enable_caching: Cache edits for reuse
-        """
-        self.device = device if torch.cuda.is_available() and device == "cuda" else "cpu"
-        self.model_id = model_id
-        self.guidance_scale = guidance_scale
-        self.num_inference_steps = num_inference_steps
-        self.resize_to = resize_to
-        self.enable_caching = enable_caching
-
-        self.pipe = None
+    def __init__(self, device="cuda", use_lcm=True):
+        self.device = device if torch.cuda.is_available() else "cpu"
         self.has_diffusion = False
+        
+        # Configuration
+        self.context_length = 16  # AnimateDiff works best with 16 frames
+        self.use_lcm = use_lcm    
 
-        if _HAS_DIFFUSERS:
+        if HAS_DIFFUSERS:
             try:
-                self.pipe = StableDiffusionInpaintPipeline.from_pretrained(
+                print(f" Loading Video Diffusion (AnimateDiff Video-to-Video)...")
+                
+                # 1. Load Motion Adapter
+                adapter = MotionAdapter.from_pretrained("guoyww/animatediff-motion-adapter-v1-5-2", torch_dtype=torch.float16)
+
+                # 2. Load Pipeline
+                model_id = "runwayml/stable-diffusion-v1-5" 
+                
+                self.pipe = AnimateDiffVideoToVideoPipeline.from_pretrained(
                     model_id,
-                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                    safety_checker=None,
-                    variant="fp16" if self.device == "cuda" else None
+                    motion_adapter=adapter,
+                    torch_dtype=torch.float16
                 )
-                try:
-                    self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
-                except Exception:
-                    pass
 
-                if self.device == "cuda":
-                    self.pipe = self.pipe.to("cuda")
+                # 3. Optimize for Efficiency (LCM-LoRA)
+                if self.use_lcm:
+                    print("  ⚡ Applying LCM-LoRA for efficiency (4-8 steps)...")
+                    self.pipe.scheduler = LCMScheduler.from_config(self.pipe.scheduler.config)
+                    self.pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm")
+                    self.pipe.set_adapters(["lcm"], adapter_weights=[1.0])
 
+                # 4. Enable Optimizations
+                self.pipe.enable_vae_slicing()
+                
+                # --- FIX: CPU Offload handles device placement automatically ---
+                # Do NOT call self.pipe.to("cuda") if using cpu_offload
+                self.pipe.enable_model_cpu_offload() 
+                
                 self.has_diffusion = True
-                print(f"✓ Diffusion inpainting model loaded: {model_id} (device={self.device})")
-                print(f"  Caching: {'ENABLED' if enable_caching else 'DISABLED'}")
+                print("✓ AnimateDiff Video Editor ready!\n")
             except Exception as e:
-                warnings.warn(f"Could not load diffusion pipeline '{model_id}': {e}. Falling back to blur.")
-                self.pipe = None
-                self.has_diffusion = False
-        else:
-            warnings.warn("diffusers library not found. Install 'diffusers transformers accelerate'.")
-            self.has_diffusion = False
+                warnings.warn(f"Could not load editor: {e}")
+                import traceback
+                traceback.print_exc()
 
+    def _get_prompt(self, class_name):
+        for key in self.CLASS_PROMPTS:
+            if key in class_name.lower(): return self.CLASS_PROMPTS[key]
+        return self.CLASS_PROMPTS['default']
 
-    def _get_prompt_for_class(self, class_name: str) -> str:
-        """Get diffusion prompt for class"""
-        # Try exact match first
-        if class_name.lower() in self.CLASS_PROMPT_MAP:
-            return self.CLASS_PROMPT_MAP[class_name.lower()]
+    def edit_frame_batch(self, frames: List[np.ndarray], detections_batch, tracks_batch, mem_results_batch, mem_threshold):
+        if not self.has_diffusion: 
+            return frames, {'method': 'no_diffusion', 'edits': 0}
+
+        # Identify tracks
+        track_edits = self._collect_track_edits(frames, detections_batch, tracks_batch, mem_results_batch, mem_threshold)
         
-        # Try partial match
-        for key in self.CLASS_PROMPT_MAP:
-            if key in class_name.lower():
-                return self.CLASS_PROMPT_MAP[key]
+        if len(track_edits) == 0: 
+            return frames, {'method': 'no_edits', 'edits': 0}
+
+        # We must copy frames to avoid overwriting originals during processing
+        edited_frames = [f.copy() for f in frames]
+        total_edits = 0
+
+        for track_id, edit_info in track_edits.items():
+            print(f"   Batch Processing Track {track_id} ({edit_info['class_name']})...")
+            try:
+                edited_frames = self._process_video_track(edited_frames, edit_info)
+                total_edits += len(edit_info['frame_indices'])
+            except Exception as e:
+                print(f"  ⚠ Failed to process track {track_id}: {e}")
+                continue
+
+        return edited_frames, {
+            'method': 'animatediff_video',
+            'edits': total_edits,
+            'tracks_edited': len(track_edits)
+        }
+
+    def _process_video_track(self, full_frames, edit_info):
+        frame_indices = sorted(edit_info['frame_indices'])
+        bboxes = edit_info['bboxes']
+        prompt = self._get_prompt(edit_info['class_name'])
+        neg_prompt = "text, watermark, distortion, blurry, low quality, warping, flickering, humans, hands"
+
+        # Chunking strategy
+        chunk_size = self.context_length
         
-        return self.CLASS_PROMPT_MAP['default']
-
-
-    def _compute_context_padding(self, bbox_width: int, bbox_height: int) -> int:
-        """
-        Compute proportional context padding based on bbox size
-        Returns padding in pixels
-        """
-        # Use 15% of smaller dimension, capped at 50 pixels
-        smaller_dim = min(bbox_width, bbox_height)
-        pad = int(0.15 * smaller_dim)
-        return min(50, max(10, pad))
-
-
-    def edit_frame(self,
-                frame_bgr: np.ndarray,
-                detections: List[Dict],
-                mem_results: Dict[int, Dict],
-                mem_threshold: float = 0.6,
-                process_entire_bbox: bool = True,
-                pad: int = 0,
-                strength: float = 0.8) -> Tuple[np.ndarray, List[Dict]]:
-        """
-        Edit frame: run inpainting on high-memorability detections
-
-        Args:
-            frame_bgr: BGR image
-            detections: List of detections
-            mem_results: Memorability results {det_idx: {...}}
-            mem_threshold: Threshold for editing
-            process_entire_bbox: Process entire bbox vs attention regions
-            pad: Additional padding around bbox (added to adaptive padding)
-            strength: Diffusion strength (0-1, higher = more change)
-
-        Returns:
-            (edited_frame, list_of_edits)
-        """
-        img_h, img_w = frame_bgr.shape[:2]
-
-        # Determine which detections to edit
-        to_edit = []
-        for idx, det in enumerate(detections):
-            mem_info = mem_results.get(idx)
-            if mem_info is None:
-                continue
-            score = float(mem_info.get('memorability_score', 0.0))
-            if score > mem_threshold:
-                bbox = det.get('bbox')
-                safe_bbox = _ensure_bbox_in_bounds(tuple(bbox), img_w, img_h)
-                if safe_bbox:
-                    to_edit.append({
-                        'det_idx': idx,
-                        'bbox': safe_bbox,
-                        'class_name': det.get('class_name', 'default'),
-                        'mem_score': score
-                    })
-
-        if len(to_edit) == 0:
-            return frame_bgr, []
-
-        # Process largest boxes first
-        to_edit.sort(key=lambda x: (x['bbox'][2] - x['bbox'][0]) * (x['bbox'][3] - x['bbox'][1]), reverse=True)
-
-        working_img = frame_bgr.copy()
-        edits = []
-
-        for item in to_edit:
-            bbox = item['bbox']
-            class_name = item['class_name']
-            x1, y1, x2, y2 = bbox
-
-            w = x2 - x1
-            h = y2 - y1
-
-            # Compute adaptive context padding
-            adaptive_pad = self._compute_context_padding(w, h)
-            total_pad = adaptive_pad + int(pad)
-
-            # Extract crop with context padding
-            x1_ctx = max(0, x1 - total_pad)
-            y1_ctx = max(0, y1 - total_pad)
-            x2_ctx = min(img_w, x2 + total_pad)
-            y2_ctx = min(img_h, y2 + total_pad)
-
-            # Defensive check
-            if x2_ctx <= x1_ctx or y2_ctx <= y1_ctx:
+        for i in range(0, len(frame_indices), chunk_size):
+            chunk_indices = frame_indices[i : i + chunk_size]
+            chunk_bboxes = bboxes[i : i + chunk_size]
+            
+            if len(chunk_indices) < 2: 
                 continue
 
-            crop = working_img[y1_ctx:y2_ctx, x1_ctx:x2_ctx].copy()
-            crop_h, crop_w = crop.shape[:2]
+            batch_crops = []
+            batch_masks = []
+            crop_coords_list = []
+            valid_chunk_indices = []
+            
+            # Extract
+            for idx, global_frame_idx in enumerate(chunk_indices):
+                bbox = chunk_bboxes[idx]
+                frame = full_frames[global_frame_idx]
+                crop, mask, coords = self._extract_crop(frame, bbox)
+                
+                if crop is not None:
+                    batch_crops.append(crop)
+                    batch_masks.append(mask)
+                    crop_coords_list.append(coords)
+                    valid_chunk_indices.append(global_frame_idx)
 
-            # Create mask for detection region within crop
-            mask_crop = np.zeros((crop_h, crop_w), dtype=np.uint8)
-            mask_x1 = max(0, x1 - x1_ctx)
-            mask_y1 = max(0, y1 - y1_ctx)
-            mask_x2 = min(crop_w, x2 - x1_ctx)
-            mask_y2 = min(crop_h, y2 - y1_ctx)
+            if not batch_crops: continue
 
-            # Validate mask coords
-            if mask_x2 <= mask_x1 or mask_y2 <= mask_y1:
-                continue
+            # Run Diffusion
+            generated_frames = self._run_video_generation(
+                batch_crops, 
+                prompt, 
+                neg_prompt
+            )
 
-            mask_crop[mask_y1:mask_y2, mask_x1:mask_x2] = 255
+            # Paste Back
+            for idx, gen_img in enumerate(generated_frames):
+                if idx >= len(valid_chunk_indices): break 
+                
+                global_idx = valid_chunk_indices[idx]
+                coords = crop_coords_list[idx]
+                mask = batch_masks[idx]
+                
+                gen_cv2 = cv2.cvtColor(np.array(gen_img), cv2.COLOR_RGB2BGR)
+                
+                full_frames[global_idx] = self._paste_crop(
+                    full_frames[global_idx], 
+                    gen_cv2, 
+                    coords, 
+                    mask
+                )
 
-            # Generate edit with diffusion
-            prompt = self._get_prompt_for_class(class_name)
-            negative_prompt = "wheel, tire, rim, circular objects, round shapes, stripes, lines, text, logos, patterns, distortion, warping"
+        return full_frames
 
-            if self.has_diffusion and self.pipe is not None:
-                try:
-                    # Convert crop to PIL
-                    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                    crop_pil = Image.fromarray(crop_rgb)
-                    mask_pil = Image.fromarray(mask_crop)
+    def _run_video_generation(self, images: List[Image.Image], prompt, negative_prompt):
+        # Resize to 512x512
+        w, h = 512, 512
+        resized_images = [img.resize((w, h), Image.LANCZOS) for img in images]
 
-                    # Resize for processing (maintain aspect ratio)
-                    target_size = self.resize_to if self.resize_to is not None else 512
-                    try:
-                        target_size = int(max(64, target_size))
-                    except Exception:
-                        target_size = 512
+        steps = 6 if self.use_lcm else 20
+        guidance = 1.5 if self.use_lcm else 7.5
+        strength = 0.8
 
-                    aspect = float(crop_w) / float(max(1, crop_h))
-                    if aspect > 1.0:
-                        new_w = target_size
-                        new_h = max(64, int(round(target_size / aspect)))
-                    else:
-                        new_h = target_size
-                        new_w = max(64, int(round(target_size * aspect)))
+        output = self.pipe(
+            video=resized_images, 
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=steps,
+            guidance_scale=guidance,
+            strength=strength,
+            generator=torch.Generator("cuda").manual_seed(42)
+        ).frames[0]
 
-                    # Ensure dimensions are multiples of 8 (required by stable diffusion)
-                    new_w = (new_w // 8) * 8
-                    new_h = (new_h // 8) * 8
-                    new_w = max(64, new_w)
-                    new_h = max(64, new_h)
+        # Resize back
+        final_output = []
+        for i, img in enumerate(output):
+            orig_w, orig_h = images[i].size
+            final_output.append(img.resize((orig_w, orig_h), Image.LANCZOS))
+            
+        return final_output
 
-                    crop_resized = crop_pil.resize((new_w, new_h), resample=Image.LANCZOS)
-                    mask_resized = mask_pil.resize((new_w, new_h), resample=Image.NEAREST)
+    def _extract_crop(self, frame, bbox):
+        x1, y1, x2, y2 = bbox
+        pad = 20 
+        h, w = frame.shape[:2]
+        x1_c = max(0, x1 - pad)
+        y1_c = max(0, y1 - pad)
+        x2_c = min(w, x2 + pad)
+        y2_c = min(h, y2 + pad)
+        
+        crop = frame[y1_c:y2_c, x1_c:x2_c]
+        if crop.size == 0: return None, None, None
 
-                    # Run inpainting with adaptive strength
-                    out = self.pipe(
-                        prompt=prompt,
-                        negative_prompt=negative_prompt,
-                        image=crop_resized,
-                        mask_image=mask_resized,
-                        num_inference_steps=self.num_inference_steps,
-                        guidance_scale=self.guidance_scale,
-                        strength=strength  # Use adaptive strength
-                    )
+        mask = np.zeros((crop.shape[0], crop.shape[1]), dtype=np.uint8)
+        bx1 = max(0, x1 - x1_c)
+        by1 = max(0, y1 - y1_c)
+        bx2 = min(crop.shape[1], x2 - x1_c)
+        by2 = min(crop.shape[0], y2 - y1_c)
+        mask[by1:by2, bx1:bx2] = 255
+        
+        return (
+            Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)),
+            Image.fromarray(mask),
+            (x1_c, y1_c, x2_c, y2_c)
+        )
 
-                    # Validate output
-                    if not hasattr(out, 'images') or len(out.images) == 0:
-                        raise RuntimeError("Diffusion pipeline returned no images")
+    def _paste_crop(self, frame, crop, crop_coords, mask):
+        x1, y1, x2, y2 = crop_coords
+        target_h, target_w = y2 - y1, x2 - x1
+        
+        if crop.shape[:2] != (target_h, target_w):
+            crop = cv2.resize(crop, (target_w, target_h))
+            
+        mask_np = np.array(mask.resize((target_w, target_h))) / 255.0
+        mask_blur = cv2.GaussianBlur(mask_np, (21, 21), 10)
+        mask_3ch = np.stack([mask_blur] * 3, axis=-1)
+        
+        roi = frame[y1:y2, x1:x2]
+        blended = (crop.astype(np.float32) * mask_3ch + roi.astype(np.float32) * (1 - mask_3ch)).astype(np.uint8)
+        
+        result = frame.copy()
+        result[y1:y2, x1:x2] = blended
+        return result
+        
+    def _collect_track_edits(self, frames, detections_batch, tracks_batch, mem_results_batch, mem_threshold):
+        track_edits = {}
+        for frame_idx in range(len(frames)):
+            detections = detections_batch[frame_idx]
+            tracks = tracks_batch[frame_idx]
+            mem_results = mem_results_batch[frame_idx]
+            det_to_track = self._match_detections_to_tracks(detections, tracks)
+            for det_idx, track_id in det_to_track.items():
+                mem_info = mem_results.get(det_idx)
+                if mem_info and mem_info['memorability_score'] > mem_threshold:
+                    if track_id not in track_edits:
+                        track_edits[track_id] = {
+                            'class_name': detections[det_idx]['class_name'], 
+                            'frame_indices': [], 
+                            'bboxes': []
+                        }
+                    track_edits[track_id]['frame_indices'].append(frame_idx)
+                    track_edits[track_id]['bboxes'].append(tuple(detections[det_idx]['bbox']))
+        return track_edits
+    
+    def _match_detections_to_tracks(self, detections, tracks):
+        det_to_track = {}
+        for det_idx, det in enumerate(detections):
+            best_iou, best_id = 0, None
+            for track in tracks:
+                iou = self._compute_iou(det['bbox'], track['bbox'])
+                if iou > best_iou: best_iou, best_id = iou, track['track_id']
+            if best_iou > 0.5: det_to_track[det_idx] = best_id
+        return det_to_track
 
-                    out_img = out.images[0]
+    def _compute_iou(self, bbox1, bbox2):
+        x1_min, y1_min, x1_max, y1_max = bbox1
+        x2_min, y2_min, x2_max, y2_max = bbox2
+        inter_x_min, inter_y_min = max(x1_min, x2_min), max(y1_min, y2_min)
+        inter_x_max, inter_y_max = min(x1_max, x2_max), min(y1_max, y2_max)
+        if inter_x_max < inter_x_min or inter_y_max < inter_y_min: return 0.0
+        inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+        union_area = (x1_max - x1_min) * (y1_max - y1_min) + (x2_max - x2_min) * (y2_max - y2_min) - inter_area
+        return inter_area / union_area if union_area > 0 else 0.0
 
-                    # Resize back to original crop size
-                    out_img = out_img.resize((crop_w, crop_h), resample=Image.LANCZOS)
-                    out_bgr = _bgr_from_pil(out_img)
-
-                    # Blend masked region into crop
-                    mask_bool = mask_crop > 127
-                    crop_edited = crop.copy()
-                    for c in range(3):
-                        crop_edited[:, :, c][mask_bool] = out_bgr[:, :, c][mask_bool]
-
-                    # Paste edited crop back into working image
-                    working_img[y1_ctx:y2_ctx, x1_ctx:x2_ctx] = crop_edited
-
-                    edits.append({
-                        'det_idx': item['det_idx'],
-                        'bbox': bbox,
-                        'class_name': class_name,
-                        'prompt': prompt,
-                        'method': 'diffusion_crop',
-                        'mem_score': item['mem_score'],
-                        'strength': strength
-                    })
-
-                except Exception as e:
-                    # Robust fallback: blur the context region
-                    warnings.warn(f"Crop inpainting failed for bbox {bbox}: {e}. Using blur fallback.")
-                    roi = working_img[y1_ctx:y2_ctx, x1_ctx:x2_ctx]
-                    # Ensure kernel size is odd and reasonable
-                    k = max(3, min(51, min(roi.shape[0], roi.shape[1]) // 8))
-                    if k % 2 == 0:
-                        k += 1
-                    blurred = cv2.GaussianBlur(roi, (k, k), 0)
-                    working_img[y1_ctx:y2_ctx, x1_ctx:x2_ctx] = blurred
-                    edits.append({
-                        'det_idx': item['det_idx'],
-                        'bbox': bbox,
-                        'class_name': class_name,
-                        'prompt': prompt,
-                        'method': 'fallback_blur',
-                        'mem_score': item['mem_score']
-                    })
-            else:
-                # No diffusion available: blur fallback
-                roi = working_img[y1_ctx:y2_ctx, x1_ctx:x2_ctx]
-                k = max(3, min(51, min(roi.shape[0], roi.shape[1]) // 8))
-                if k % 2 == 0:
-                    k += 1
-                blurred = cv2.GaussianBlur(roi, (k, k), 0)
-                working_img[y1_ctx:y2_ctx, x1_ctx:x2_ctx] = blurred
-                edits.append({
-                    'det_idx': item['det_idx'],
-                    'bbox': bbox,
-                    'class_name': class_name,
-                    'prompt': prompt,
-                    'method': 'fallback_blur',
-                    'mem_score': item['mem_score']
-                })
-
-        return working_img, edits
+    def clear_cache(self):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
